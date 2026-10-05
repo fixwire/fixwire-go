@@ -147,6 +147,12 @@ fixwire.CaptureFeedback(fixwire.Feedback{Message: "Refunded the wrong order", Sc
 | `InAppInclude`, `InAppExclude` | the main module | Which frames are your code |
 | `ContextLines` | 5 | Source lines around in-app frames, when the files are there |
 
+## Examples
+
+[examples](examples) holds real programs, run by its tests against a fake
+ingest: an HTTP API ([shop-api](examples/shop-api)) and a cron job
+([nightly-report](examples/nightly-report)).
+
 ## License
 
 MIT.
