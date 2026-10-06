@@ -18,7 +18,7 @@ API.
 - A caller's `tracestate` over 512 bytes or `baggage` over 8 KB, or with a control character other than tab (W3C's list whitespace), is not passed on.
 - Source context is read outside the cache's lock, from regular files only; errors' own stacks are capped at 100 frames.
 - Release health keeps at most 5000 counts between sends; past that, sessions are counted without their user. A sessions request holds at most 5000 aggregates.
-- Limits as every Fixwire SDK has them (`sdks/PROTOCOL.md` §13):
+- Limits as every Fixwire SDK has them:
   - `MaxValueLength` (default 1024): strings are cut to that many bytes of UTF-8, on a character boundary, ending in `...`; redaction runs first, over the part kept and the next 16 kB, so a secret the cut goes through is masked. The app's own configuration (release, environment, service and server names, a monitor's slug and config) is cut but never masked: `api@1.2.3.example` stays a release.
   - `MaxStackFrames` (default 100): frames per error, the newest kept. A chain ends where it comes back to an error already in it.
   - Values (contexts, extras, attributes, breadcrumb data) are walked 10 levels deep, 100 items wide and 10,000 maps and lists at most, never through `encoding/json` on the app's whole value: `[Circular ~]`, `[Object]`/`[Array]` and `[Unreadable]` mark what is left out; NaN and the infinities are `"NaN"`, `"Infinity"`, `"-Infinity"`.
