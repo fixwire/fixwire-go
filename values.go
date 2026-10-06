@@ -16,7 +16,7 @@ import (
 )
 
 // What a value sent (a context, an extra, an attribute, a breadcrumb's data)
-// may hold, as every Fixwire SDK bounds it (sdks/PROTOCOL.md §13): maps and
+// may hold, as every Fixwire SDK bounds it (fixwire-protocol §13): maps and
 // lists 10 deep and 100 wide, and 10,000 of them walked. A map or list past
 // that is "[Object]" or "[Array]", one inside itself "[Circular ~]", one that
 // can't be read (its MarshalJSON or Error panics) "[Unreadable]".

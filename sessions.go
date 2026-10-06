@@ -8,7 +8,7 @@ import (
 )
 
 // Release health for servers: each request is a session, counted per
-// minute and user and sent about every minute (sdks/PROTOCOL.md §5).
+// minute and user and sent about every minute (fixwire-protocol §5).
 
 // requestSession is the session of the request a scope serves.
 type requestSession struct {

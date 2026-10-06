@@ -113,7 +113,7 @@ func (c *Client) encodeLogs(records ...map[string]any) ([]byte, error) {
 	}}})
 }
 
-// eventRecord is an error or a message as a log record (sdks/PROTOCOL.md §4),
+// eventRecord is an error or a message as a log record (fixwire-protocol §4),
 // redacted.
 func (c *Client) eventRecord(e *Event) map[string]any {
 	a := map[string]any{

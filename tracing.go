@@ -166,7 +166,7 @@ func kindOf(op string) SpanKind {
 
 // sampleTrace decides a new trace the way every Fixwire SDK does: kept
 // when its id's last 56 bits, as a fraction of 2^56, are at least
-// 1 - rate (sdks/PROTOCOL.md §9).
+// 1 - rate (fixwire-protocol §9).
 func sampleTrace(traceID string, rate float64) bool {
 	switch {
 	case rate <= 0:
