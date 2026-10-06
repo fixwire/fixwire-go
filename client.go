@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fixwire/fixwire/sdks/go/internal/redact"
+	"github.com/fixwire/fixwire-go/internal/redact"
 )
 
 // Client sends to one project. Most programs use the one Init sets up,

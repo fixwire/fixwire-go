@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	fixwire "github.com/fixwire/fixwire/sdks/go"
-	"github.com/fixwire/fixwire/sdks/go/fixwirehttp"
+	fixwire "github.com/fixwire/fixwire-go"
+	"github.com/fixwire/fixwire-go/fixwirehttp"
 )
 
 // ingest records the bodies the SDK sends, by path.

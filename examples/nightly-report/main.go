@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	fixwire "github.com/fixwire/fixwire/sdks/go"
+	fixwire "github.com/fixwire/fixwire-go"
 )
 
 // ErrNoData is what an account without invoices gives.

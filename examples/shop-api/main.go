@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	fixwire "github.com/fixwire/fixwire/sdks/go"
-	"github.com/fixwire/fixwire/sdks/go/fixwirehttp"
+	fixwire "github.com/fixwire/fixwire-go"
+	"github.com/fixwire/fixwire-go/fixwirehttp"
 )
 
 // The catalog stands in for a database.

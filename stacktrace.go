@@ -11,7 +11,7 @@ import (
 )
 
 // The SDK's own packages: their frames are left out of stacks.
-const sdkModule = "github.com/fixwire/fixwire/sdks/go"
+const sdkModule = "github.com/fixwire/fixwire-go"
 
 // maxFrames bounds a captured stack.
 const maxFrames = 100

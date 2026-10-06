@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	fixwire "github.com/fixwire/fixwire/sdks/go"
+	fixwire "github.com/fixwire/fixwire-go"
 )
 
 // Options configure the middleware.

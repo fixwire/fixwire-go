@@ -1,3 +1,3 @@
-module github.com/fixwire/fixwire/sdks/go
+module github.com/fixwire/fixwire-go
 
 go 1.23

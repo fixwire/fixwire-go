@@ -4,11 +4,11 @@ The Fixwire SDK for Go: errors and panics, traces, release health, cron
 monitors and feedback. Standard library only; Go 1.23 or newer.
 
 ```sh
-go get github.com/fixwire/fixwire/sdks/go
+go get github.com/fixwire/fixwire-go
 ```
 
 ```go
-import fixwire "github.com/fixwire/fixwire/sdks/go"
+import fixwire "github.com/fixwire/fixwire-go"
 
 func main() {
 	err := fixwire.Init(fixwire.Options{
@@ -66,7 +66,7 @@ and lets it go on, so the program behaves as it would without Fixwire.
 ## HTTP servers and clients
 
 ```go
-import "github.com/fixwire/fixwire/sdks/go/fixwirehttp"
+import "github.com/fixwire/fixwire-go/fixwirehttp"
 
 handler := fixwirehttp.New(fixwirehttp.Options{}).Handle(mux)
 ```

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	fixwire "github.com/fixwire/fixwire/sdks/go"
+	fixwire "github.com/fixwire/fixwire-go"
 )
 
 // Transport times outgoing requests as client spans of the trace in the
