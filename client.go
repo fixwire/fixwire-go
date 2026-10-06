@@ -6,7 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	mrand "math/rand/v2"
+	"net"
+	"net/url"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fixwire/fixwire-go/internal/redact"
@@ -100,9 +107,23 @@ func (c *Client) capture(e *Event, scope *Scope) string {
 			return ""
 		}
 	}
-	body, err := c.encodeLogs(c.eventRecord(e))
+	record := c.eventRecord(e)
+	body, err := c.encodeLogs(record)
+	// An event is at most 1 MB: past it, its breadcrumbs go, then its
+	// contexts (Go frames carry no local variables), then the event.
+	for _, key := range []string{"fixwire.breadcrumbs", "fixwire.contexts"} {
+		if err != nil || len(body) <= maxEventBytes {
+			break
+		}
+		shed(record, key)
+		body, err = c.encodeLogs(record)
+	}
 	if err != nil {
 		c.transport.logf("encoding an event: %v", err)
+		return ""
+	}
+	if len(body) > maxEventBytes {
+		c.transport.logf("dropped an event of %d bytes", len(body))
 		return ""
 	}
 	if !c.transport.send(&request{path: "/v1/logs", contentType: "application/json", category: categoryError, body: body}) {
@@ -111,12 +132,11 @@ func (c *Client) capture(e *Event, scope *Scope) string {
 	return e.EventID
 }
 
-// scrub masks secrets and personal data in m, but for the keys in skip;
-// m comes back in JSON's own types.
+// scrub readies m, of JSON's own types (app values through plain), to be
+// sent, in place: secrets and personal data masked, but in the keys of skip,
+// then strings cut to MaxValueLength. Redaction reads the part of a string
+// kept and the next 16 kB.
 func (c *Client) scrub(m map[string]any, skip ...string) map[string]any {
-	if c.redactor == nil {
-		return m
-	}
 	kept := map[string]any{}
 	for _, k := range skip {
 		if v, ok := m[k]; ok {
@@ -124,66 +144,115 @@ func (c *Client) scrub(m map[string]any, skip ...string) map[string]any {
 			delete(m, k)
 		}
 	}
-	src, ok := jsonOf(m).(map[string]any)
-	if !ok {
-		// A value without a JSON form (NaN, a channel, a cycle) must not
-		// cost the others: they go one by one, and it as the reason.
-		src = make(map[string]any, len(m))
-		for k, v := range m {
-			if _, err := json.Marshal(v); err != nil {
-				src[k] = err.Error()
-			} else {
-				src[k] = jsonOf(v)
+	limit := c.opts.MaxValueLength
+	eachString(m, func(s string) string { return ahead(s, limit) })
+	if c.redactor != nil {
+		m = c.redact(m)
+	}
+	eachString(m, func(s string) string { return cut(s, limit) })
+	for k, v := range kept {
+		m[k] = v
+	}
+	return m
+}
+
+// redact masks m in place. Where redaction fails, the values go as
+// [Filtered], never as they are.
+func (c *Client) redact(m map[string]any) (out map[string]any) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.transport.logf("redaction failed, sending [Filtered]: %v", r)
+			out = make(map[string]any, len(m))
+			for k := range m {
+				out[c.mask(k)] = redact.Filtered
 			}
 		}
-	}
-	plain, _ := c.redactor.Walk(src)
-	out, _ := plain.(map[string]any)
-	if out == nil {
-		out = map[string]any{}
-	}
-	for k, v := range kept {
-		out[k] = v
-	}
+	}()
+	v, _ := c.redactor.Walk(m)
+	out, _ = v.(map[string]any)
 	return out
 }
 
-// mask masks secrets and personal data in s.
-func (c *Client) mask(s string) string {
+// mask masks secrets and personal data in s; [Filtered] where redaction
+// fails.
+func (c *Client) mask(s string) (masked string) {
 	if c.redactor == nil || s == "" {
 		return s
 	}
-	s, _ = c.redactor.Mask(s)
-	return s
+	defer func() {
+		if recover() != nil {
+			masked = redact.Filtered
+		}
+	}()
+	masked, _ = c.redactor.Mask(s)
+	return masked
 }
 
-// jsonOf is v as JSON decodes it (maps, slices, strings, json.Number, …).
-func jsonOf(v any) any {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	var out any
-	if dec.Decode(&out) != nil {
-		return nil
-	}
-	return out
+// text is a string as it is sent: masked, then cut to MaxValueLength.
+func (c *Client) text(s string) string {
+	return cut(c.mask(ahead(s, c.opts.MaxValueLength)), c.opts.MaxValueLength)
 }
 
-// ShouldPropagate reports whether trace headers may go to url: it holds one
-// of the TracePropagationTargets.
-func (c *Client) ShouldPropagate(url string) bool {
-	if c == nil {
+// ShouldPropagate reports whether trace headers may go to rawURL: it
+// matches one of the TracePropagationTargets (see Options).
+func (c *Client) ShouldPropagate(rawURL string) bool {
+	if c == nil || len(c.opts.TracePropagationTargets) == 0 {
 		return false
 	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	// The URL as compared: without user info, query and fragment.
+	scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
+	compared := scheme + "://" + strings.ToLower(u.Host) + u.EscapedPath()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[scheme]
+	}
 	for _, t := range c.opts.TracePropagationTargets {
-		if t != "" && strings.Contains(url, t) {
+		switch {
+		case strings.Contains(t, "://"):
+			if strings.HasPrefix(compared, t) {
+				return true
+			}
+		case t == "" || strings.HasPrefix(t, "/"):
+			// A path is a browser page's own origin's: servers have none.
+		case hostMatches(t, host, port):
 			return true
 		}
 	}
 	return false
+}
+
+// hostMatches reports whether a URL's host and port match target, a host
+// with a port if it has one: that host, or one of its subdomains.
+func hostMatches(target, host, port string) bool {
+	th, tp := strings.ToLower(target), ""
+	if h, p, err := net.SplitHostPort(th); err == nil {
+		th, tp = h, p
+	}
+	th = strings.Trim(th, "[]")
+	if th == "" || tp != "" && tp != port {
+		return false
+	}
+	return host == th || strings.HasSuffix(host, "."+th)
+}
+
+// The size of what is sent: an error or a message is at most maxEventBytes
+// of JSON; spans go maxItems to a request of at most maxRequestBytes.
+const (
+	maxEventBytes   = 1 << 20
+	maxItems        = 100
+	maxRequestBytes = 5 << 20
+)
+
+// shed leaves an attribute out of an OTLP record.
+func shed(record map[string]any, key string) {
+	attrs, _ := record["attributes"].([]any)
+	record["attributes"] = slices.DeleteFunc(attrs, func(a any) bool {
+		kv, _ := a.(map[string]any)
+		return kv["key"] == key
+	})
 }
 
 // sendJSON queues a Fixwire JSON request.
@@ -233,6 +302,59 @@ func (c *Client) guard() {
 	if r := recover(); r != nil && c != nil && c.transport != nil {
 		c.transport.logf("recovered from a panic: %v", r)
 	}
+}
+
+// capturing holds the goroutines capturing now, so that what the app logs
+// from the code a capture calls (BeforeSend, an error's Error method) is not
+// captured again, and again.
+var capturing struct {
+	n   atomic.Int32 // captures under way, on any goroutine
+	mu  sync.Mutex
+	ids map[uint64]int // goroutine → captures under way on it
+}
+
+// enterCapture marks the calling goroutine as capturing until leave.
+func enterCapture() (leave func()) {
+	id := goroutineID()
+	capturing.mu.Lock()
+	if capturing.ids == nil {
+		capturing.ids = map[uint64]int{}
+	}
+	capturing.ids[id]++
+	capturing.n.Add(1)
+	capturing.mu.Unlock()
+	return func() {
+		capturing.mu.Lock()
+		if capturing.ids[id]--; capturing.ids[id] <= 0 {
+			delete(capturing.ids, id)
+		}
+		capturing.n.Add(-1)
+		capturing.mu.Unlock()
+	}
+}
+
+// inCapture reports whether the calling goroutine is capturing: at once
+// when no goroutine is.
+func inCapture() bool {
+	if capturing.n.Load() == 0 {
+		return false
+	}
+	id := goroutineID()
+	capturing.mu.Lock()
+	defer capturing.mu.Unlock()
+	return capturing.ids[id] > 0
+}
+
+// goroutineID is the calling goroutine's id, from the first line of its
+// stack ("goroutine 18 [running]:").
+func goroutineID() uint64 {
+	var buf [64]byte
+	b := bytes.TrimPrefix(buf[:runtime.Stack(buf[:], false)], []byte("goroutine "))
+	if i := bytes.IndexByte(b, ' '); i > 0 {
+		b = b[:i]
+	}
+	id, _ := strconv.ParseUint(string(b), 10, 64)
+	return id
 }
 
 // newID is n random bytes in hex: 16 for event and trace ids, 8 for span

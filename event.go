@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 )
@@ -125,13 +126,16 @@ func (r *Request) route() string {
 // maxChain bounds the errors of a chain read from Unwrap.
 const maxChain = 10
 
-// exceptionsOf turns an error chain into exceptions, the outermost first.
-// An error that recorded its stack (StackTrace or Callers, as pkg/errors
-// and go-errors do) gets it; plain Go errors carry none, so the outermost
-// gets frames, the stack of where it was captured.
+// exceptionsOf turns an error chain into exceptions, the outermost first,
+// ending where the chain comes back to an error already in it. An error
+// that recorded its stack (StackTrace or Callers, as pkg/errors and
+// go-errors do) gets it; plain Go errors carry none, so the outermost gets
+// frames, the stack of where it was captured.
 func exceptionsOf(err error, frames []Frame, mechanism Mechanism, opts Options) []Exception {
 	var out []Exception
-	for e := err; e != nil && len(out) < maxChain; e = unwrapOne(e) {
+	var seen []error
+	for e := err; e != nil && len(out) < maxChain && !slices.ContainsFunc(seen, func(s error) bool { return same(s, e) }); e = unwrapOne(e) {
+		seen = append(seen, e)
 		typ, module := errorType(e)
 		out = append(out, Exception{Type: typ, Message: e.Error(), Module: module, Frames: errorStack(e, opts),
 			Mechanism: Mechanism{Type: "chained", Handled: mechanism.Handled}})
@@ -143,6 +147,17 @@ func exceptionsOf(err error, frames []Frame, mechanism Mechanism, opts Options) 
 		out[0].Mechanism = mechanism
 	}
 	return out
+}
+
+// same reports whether a and b are the same error; false where they can't
+// be compared (a struct holding a slice).
+func same(a, b error) (eq bool) {
+	defer func() {
+		if recover() != nil {
+			eq = false
+		}
+	}()
+	return a == b //nolint:errorlint // the same error, not one wrapping it
 }
 
 // unwrapOne is the next error of a chain: Unwrap's, or the first of a

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -32,16 +32,17 @@ type request struct {
 	attempts                    int
 }
 
-// maxAttempts bounds the sends of one request; maxWait is the longest a
-// rate-limited request waits before it is dropped; maxPause bounds the
-// seconds an answer may pause sending for.
+// maxAttempts bounds the sends of one request (3 retries); maxWait is the
+// longest a request waits for its next try before it is dropped; maxPause
+// bounds the seconds an answer may pause sending for.
 const (
 	maxAttempts = 4
 	maxWait     = 5 * time.Minute
 	maxPause    = 24 * time.Hour
 )
 
-// backoffUnit is the first retry's wait, halved (tests shorten it).
+// backoffUnit is the first retry's wait, doubled for each next one (tests
+// shorten it).
 var backoffUnit = time.Second
 
 // debugLog writes the Debug lines to stderr itself: through the log
@@ -192,7 +193,7 @@ func (t *transport) deliver(r *request) {
 			t.finish()
 			return
 		}
-		backoff := time.Duration(math.Pow(2, float64(r.attempts))) * backoffUnit
+		backoff := backoffUnit << (r.attempts - 1)
 		if wait := max(backoff, retryAfter); wait <= maxWait {
 			t.later(r, wait)
 			return
@@ -232,24 +233,43 @@ func (t *transport) post(r *request) (status int, retryAfter time.Duration, err 
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
 	_ = res.Body.Close()
 	now := time.Now()
-	if d, ok := seconds(res.Header.Get("Retry-After")); ok {
-		retryAfter = d
-	}
-	t.limit(res.Header.Get("Fixwire-Rate-Limits"), now)
-	if res.StatusCode == http.StatusTooManyRequests && res.Header.Get("Fixwire-Rate-Limits") == "" {
-		t.limit(strconv.Itoa(max(int(retryAfter.Seconds()), 60))+":", now)
+	retryAfter, hasRetryAfter := retryAfterOf(res.Header.Get("Retry-After"), now)
+	limits := res.Header.Get("Fixwire-Rate-Limits")
+	t.limit(limits, now)
+	switch {
+	case res.StatusCode == http.StatusTooManyRequests && limits == "":
+		// Rate limited without saying what: everything waits, a minute at least.
+		t.pause("", max(retryAfter, time.Minute), now)
+	case res.StatusCode >= 500 && hasRetryAfter:
+		t.pause("", retryAfter, now)
 	}
 	return res.StatusCode, retryAfter, nil
 }
 
-// seconds reads a header's whole seconds, at most maxPause; false for
-// none, zero or negative ones, or anything else (an HTTP date).
-func seconds(s string) (time.Duration, bool) {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil || n <= 0 {
+// retryAfterOf reads Retry-After: seconds or an HTTP date, at most
+// maxPause; false for none or a broken one.
+func retryAfterOf(h string, now time.Time) (time.Duration, bool) {
+	if d, ok := seconds(h); ok {
+		return d, true
+	}
+	at, err := http.ParseTime(strings.TrimSpace(h))
+	if err != nil {
 		return 0, false
 	}
-	return time.Duration(min(n, int(maxPause/time.Second))) * time.Second, true
+	return min(max(at.Sub(now), 0), maxPause), true
+}
+
+// seconds reads a header's whole seconds, from 0 to maxPause (more is
+// maxPause); false for none, a negative number or anything else.
+func seconds(s string) (time.Duration, bool) {
+	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		return maxPause, true // digits past what a uint64 holds
+	case err != nil:
+		return 0, false
+	}
+	return time.Duration(min(n, uint64(maxPause/time.Second))) * time.Second, true
 }
 
 // limit reads Fixwire-Rate-Limits: "<seconds>:<category;…>, …", no
@@ -259,15 +279,12 @@ func (t *transport) limit(header string, now time.Time) {
 	if header == "" {
 		return
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, part := range strings.Split(header, ",") {
 		secs, cats, _ := strings.Cut(strings.TrimSpace(part), ":")
 		d, ok := seconds(secs)
 		if !ok {
 			continue
 		}
-		until := now.Add(d)
 		names := strings.Split(cats, ";")
 		if cats == "" {
 			names = []string{""}
@@ -275,13 +292,18 @@ func (t *transport) limit(header string, now time.Time) {
 		for _, c := range names {
 			switch c {
 			case "", categoryError, categoryLog, categorySpan, categorySession, categoryCheckIn, categoryFeedback:
-			default:
-				continue
-			}
-			if until.After(t.until[c]) {
-				t.until[c] = until
+				t.pause(c, d, now)
 			}
 		}
+	}
+}
+
+// pause holds a category ("" for all) back for d from now.
+func (t *transport) pause(category string, d time.Duration, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if until := now.Add(d); until.After(t.until[category]) {
+		t.until[category] = until
 	}
 }
 

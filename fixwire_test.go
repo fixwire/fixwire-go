@@ -519,7 +519,7 @@ func newStackError(msg string) error {
 func TestErrorsWithTheirOwnStack(t *testing.T) {
 	err := fmt.Errorf("load: %w", newStackError("disk gone"))
 	captured := []Frame{{Function: "capturedHere"}}
-	chain := exceptionsOf(err, captured, Mechanism{Type: "generic", Handled: true}, Options{})
+	chain := exceptionsOf(err, captured, Mechanism{Type: "generic", Handled: true}, Options{MaxStackFrames: 100})
 	if len(chain) != 2 || chain[0].Frames[0].Function != "capturedHere" {
 		t.Fatalf("chain %+v", chain)
 	}

@@ -28,6 +28,25 @@ func TestManyFindings(t *testing.T) {
 	}
 }
 
+// Text built to make a secret's name match everywhere costs no more than
+// other text: RE2 runs the pattern in one pass.
+func TestHostileSecretNames(t *testing.T) {
+	r := Default()
+	for name, s := range map[string]string{
+		"spaces after a name":     "token" + strings.Repeat(" ", 100000),
+		"names, nothing assigned": strings.Repeat("sessid", 20000),
+		"codes, nothing assigned": strings.Repeat("?code", 20000),
+		"separators":              strings.Repeat("secret_key:= '", 10000),
+		"short values":            strings.Repeat("password=abc ", 10000),
+	} {
+		start := time.Now()
+		r.Mask(s)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Errorf("%s: %d bytes took %s", name, len(s), took)
+		}
+	}
+}
+
 // Keys that mask alike are numbered in key order, each found in one step.
 func TestManyKeysMaskingAlike(t *testing.T) {
 	r := Default()

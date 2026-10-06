@@ -83,8 +83,11 @@ var registry = []detector{
 	// Bearer and Basic credentials outside a header (messages, breadcrumbs).
 	{name: HTTPAuth, prefilter: []string{"bearer", "basic"},
 		re: regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/\-]{12,}=*)`), group: 1, validate: credentialLike},
-	{name: SecretAssigned, prefilter: []string{"pass", "secret", "token", "api_key", "apikey", "api-key", "pwd"},
-		re: regexp.MustCompile(`(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)["']?\s*[:=]\s*["']?([^\s"',;&]{6,})`), group: 1,
+	// A value given to a secret's name, in text, config and URLs. The name may
+	// end a longer one (access_token, client_secret, csrfToken, PHPSESSID,
+	// X-Amz-Signature); an OAuth code counts in a query or fragment only.
+	{name: SecretAssigned, prefilter: []string{"pass", "pwd", "secret", "key", "token", "credential", "sess", "sig", "code"},
+		re: regexp.MustCompile(`(?i)(?:password|passwd|pwd|secret(?:[_-]?key)?|private[_-]?key|token|api[_-]?key|access[_-]?key|credentials?|sess(?:ion)?[_-]?id|sig(?:nature)?|[?&#]code)["']?\s*[:=]\s*["']?([^\s"',;&]{6,})`), group: 1,
 		validate: unmasked},
 	{name: Email, prefilter: []string{"@"}, caseSensitive: true, scan: emailSpans},
 	{name: CreditCard, scan: cardSpans},

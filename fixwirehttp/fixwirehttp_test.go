@@ -198,7 +198,6 @@ func TestMiddlewareRepanic(t *testing.T) {
 }
 
 func TestTransport(t *testing.T) {
-	hub, in := setup(t, fixwire.Options{TracesSampleRate: 1, TracePropagationTargets: []string{"/internal/"}})
 	var mu sync.Mutex
 	seen := map[string]string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +207,8 @@ func TestTransport(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	t.Cleanup(upstream.Close)
+	// The URLs under /internal/ (compared without their query) are a target.
+	hub, in := setup(t, fixwire.Options{TracesSampleRate: 1, TracePropagationTargets: []string{upstream.URL + "/internal/"}})
 	client := &http.Client{Transport: fixwirehttp.NewTransport(nil)}
 
 	ctx := fixwire.NewContext(context.Background(), hub)

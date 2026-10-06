@@ -48,9 +48,10 @@ func (h *SlogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.next != nil && h.next.Enabled(ctx, level)
 }
 
-// Handle records r on the hub in ctx, then passes it on.
+// Handle records r on the hub in ctx, then passes it on. What is logged
+// while the SDK captures (from BeforeSend, say) only goes on.
 func (h *SlogHandler) Handle(ctx context.Context, r slog.Record) error {
-	if r.Level >= min(h.crumb.Level(), h.event.Level()) {
+	if r.Level >= min(h.crumb.Level(), h.event.Level()) && !inCapture() {
 		h.record(ctx, r)
 	}
 	if h.next != nil && h.next.Enabled(ctx, r.Level) {
@@ -81,6 +82,7 @@ func (h *SlogHandler) record(ctx context.Context, r slog.Record) {
 	if c == nil {
 		return
 	}
+	defer enterCapture()()
 	e := &Event{Level: levelOf(r.Level), Message: r.Message, Extra: data, Timestamp: r.Time}
 	if err != nil {
 		frames := stack(c.opts)
@@ -114,9 +116,7 @@ func (h *SlogHandler) flatten(data map[string]any, groups string, a slog.Attr, e
 		return
 	}
 	if e, ok := v.Any().(error); ok && *err == nil {
-		*err = e
-		data[groups+a.Key] = e.Error()
-		return
+		*err = e // its message is read when it is sent, as a capture
 	}
 	data[groups+a.Key] = v.Any()
 }

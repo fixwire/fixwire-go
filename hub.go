@@ -99,6 +99,7 @@ func (h *Hub) CaptureException(err error) string {
 		return ""
 	}
 	defer c.guard()
+	defer enterCapture()()
 	e := &Event{Exceptions: exceptionsOf(err, stack(c.opts), Mechanism{Type: "generic", Handled: true}, c.opts)}
 	return c.capture(e, h.Scope())
 }
@@ -111,6 +112,7 @@ func (h *Hub) CaptureMessage(message string) string {
 		return ""
 	}
 	defer c.guard()
+	defer enterCapture()()
 	return c.capture(&Event{Message: message}, h.Scope())
 }
 
@@ -121,6 +123,7 @@ func (h *Hub) CaptureEvent(e *Event) string {
 		return ""
 	}
 	defer c.guard()
+	defer enterCapture()()
 	return c.capture(e, h.Scope())
 }
 
@@ -133,6 +136,7 @@ func (h *Hub) RecoverPanic(r any) string {
 		return ""
 	}
 	defer c.guard()
+	defer enterCapture()()
 	e := &Event{Level: LevelFatal, Exceptions: exceptionsOf(panicError(r), panicStack(c.opts), Mechanism{Type: "panic", Handled: false}, c.opts)}
 	if _, ok := r.(error); !ok {
 		e.Exceptions[0].Type = "panic" // panic("…") and other values
@@ -143,21 +147,29 @@ func (h *Hub) RecoverPanic(r any) string {
 // AddBreadcrumb records something that happened on the current scope.
 func (h *Hub) AddBreadcrumb(b Breadcrumb) {
 	c := h.Client()
+	defer c.guard()
 	max := 100
 	if c != nil {
 		max = c.opts.MaxBreadcrumbs
 		if c.opts.BeforeBreadcrumb != nil {
-			if p := c.opts.BeforeBreadcrumb(&b); p == nil {
+			p := beforeBreadcrumb(c.opts.BeforeBreadcrumb, &b)
+			if p == nil {
 				return
-			} else {
-				b = *p
 			}
+			b = *p
 		}
 	}
 	if max < 0 {
 		return
 	}
 	h.Scope().AddBreadcrumb(b, max)
+}
+
+// beforeBreadcrumb runs the app's BeforeBreadcrumb as a capture: what it
+// logs is not captured again.
+func beforeBreadcrumb(f func(*Breadcrumb) *Breadcrumb, b *Breadcrumb) *Breadcrumb {
+	defer enterCapture()()
+	return f(b)
 }
 
 // Flush waits until what was captured is sent, or timeout.

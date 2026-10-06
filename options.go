@@ -29,9 +29,14 @@ type Options struct {
 	// TracesSampleRate is the share of new traces kept (default 0: no
 	// tracing). Traces continued from a caller follow its decision.
 	TracesSampleRate float64
-	// TracePropagationTargets are the URLs outgoing requests carry trace
-	// headers to: those holding one of these strings (default none, so
-	// that no other service sees them).
+	// TracePropagationTargets are where outgoing requests carry trace
+	// headers (default none, so that no other service sees them). A URL is
+	// compared without its user info, query and fragment. A target with
+	// "://" matches the URLs that start with it ("https://api.example.com/v2");
+	// any other is a host, with a port if it has one, and matches that host
+	// and its subdomains ("example.com" matches api.example.com, not
+	// badexample.com or example.com.evil.net). A path ("/api") is a
+	// browser's own origin: here it matches nothing.
 	TracePropagationTargets []string
 
 	// ErrorBudget bounds the events sent per issue and per minute, so that a
@@ -44,6 +49,13 @@ type Options struct {
 	BeforeBreadcrumb func(*Breadcrumb) *Breadcrumb
 	// MaxBreadcrumbs bounds the breadcrumbs kept per scope (default 100).
 	MaxBreadcrumbs int
+	// MaxValueLength bounds each string sent, in bytes of UTF-8 (default
+	// 1024): a longer one is cut on a character boundary and ends in "...".
+	// Redaction runs before the cut, so a secret it goes through is masked.
+	MaxValueLength int
+	// MaxStackFrames bounds the frames sent per error (default 100): the
+	// newest are kept.
+	MaxStackFrames int
 	// SendDefaultPII sends the user's IP address and request headers that
 	// may identify them (off by default).
 	SendDefaultPII bool
@@ -104,6 +116,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxBreadcrumbs == 0 {
 		o.MaxBreadcrumbs = 100
+	}
+	if o.MaxValueLength <= 0 {
+		o.MaxValueLength = 1024
+	}
+	if o.MaxStackFrames <= 0 {
+		o.MaxStackFrames = 100
 	}
 	if o.ContextLines == 0 {
 		o.ContextLines = 5

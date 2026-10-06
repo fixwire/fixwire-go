@@ -14,13 +14,14 @@ import (
 // The SDK's own packages: their frames are left out of stacks.
 const sdkModule = "github.com/fixwire/fixwire-go"
 
-// maxFrames bounds a captured stack.
-const maxFrames = 100
+// stackSlack is room for the frames read and then left out: the SDK's own,
+// and those of a recover above runtime.gopanic.
+const stackSlack = 32
 
 // stack is the calling goroutine's stack, the oldest call first, without
 // the SDK's own frames.
 func stack(opts Options) []Frame {
-	pcs := make([]uintptr, maxFrames)
+	pcs := make([]uintptr, opts.MaxStackFrames+stackSlack)
 	n := runtime.Callers(1, pcs)
 	return framesOf(pcs[:n], opts, false)
 }
@@ -28,7 +29,7 @@ func stack(opts Options) []Frame {
 // panicStack is the stack of a panicking goroutine from inside its deferred
 // recover: the frames below runtime.gopanic.
 func panicStack(opts Options) []Frame {
-	pcs := make([]uintptr, maxFrames)
+	pcs := make([]uintptr, opts.MaxStackFrames+stackSlack)
 	n := runtime.Callers(1, pcs)
 	return framesOf(pcs[:n], opts, true)
 }
@@ -48,7 +49,7 @@ func errorStack(err error, opts Options) []Frame {
 			continue
 		}
 		pcs := m.Call(nil)[0]
-		out := make([]uintptr, min(pcs.Len(), maxFrames)) // the newest
+		out := make([]uintptr, min(pcs.Len(), opts.MaxStackFrames+stackSlack)) // the newest
 		for i := range out {
 			out[i] = uintptr(pcs.Index(i).Uint())
 		}
@@ -58,7 +59,8 @@ func errorStack(err error, opts Options) []Frame {
 }
 
 // framesOf reads program counters (newest first) into frames, oldest
-// first. fromPanic keeps only what was below runtime.gopanic.
+// first, the newest MaxStackFrames of them. fromPanic keeps only what was
+// below runtime.gopanic.
 func framesOf(pcs []uintptr, opts Options, fromPanic bool) []Frame {
 	iter := runtime.CallersFrames(pcs)
 	var newest []Frame
@@ -80,6 +82,7 @@ func framesOf(pcs []uintptr, opts Options, fromPanic bool) []Frame {
 			break
 		}
 	}
+	newest = newest[:min(len(newest), opts.MaxStackFrames)]
 	frames := make([]Frame, len(newest))
 	for i, f := range newest {
 		frames[len(newest)-1-i] = f
@@ -185,12 +188,15 @@ var build = sync.OnceValue(func() buildInfo {
 var source = struct {
 	sync.Mutex
 	files map[string][]string
+	bytes int // of the files cached
 }{files: map[string][]string{}}
 
-// maxSourceFiles bounds the cache; maxSourceBytes skips large files.
+// maxSourceFiles and maxSourceCache bound the cache; maxSourceBytes skips
+// larger files.
 const (
 	maxSourceFiles = 64
-	maxSourceBytes = 1 << 20
+	maxSourceCache = 32 << 20
+	maxSourceBytes = 10 << 20
 )
 
 func addContext(f *Frame, n int) {
@@ -213,23 +219,38 @@ func sourceLines(path string) []string {
 	}
 	// Read without the lock, so that a slow disk holds up this capture
 	// only; regular files only (a pipe would block).
+	size := 0
 	if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() && st.Size() <= maxSourceBytes {
 		if f, err := os.Open(path); err == nil {
 			sc := bufio.NewScanner(io.LimitReader(f, maxSourceBytes))
 			for sc.Scan() {
 				lines = append(lines, sc.Text())
+				size += len(sc.Text())
 			}
 			_ = f.Close()
 		}
 	}
 	source.Lock()
 	defer source.Unlock()
-	if len(source.files) >= maxSourceFiles {
-		for k := range source.files {
-			delete(source.files, k)
+	if _, ok := source.files[path]; ok {
+		return lines // another capture read it meanwhile
+	}
+	for k, cached := range source.files {
+		if len(source.files) < maxSourceFiles && source.bytes+size <= maxSourceCache {
 			break
 		}
+		delete(source.files, k)
+		source.bytes -= linesSize(cached)
 	}
 	source.files[path] = lines
+	source.bytes += size
 	return lines
+}
+
+func linesSize(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		n += len(l)
+	}
+	return n
 }

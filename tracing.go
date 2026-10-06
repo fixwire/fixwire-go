@@ -3,7 +3,6 @@ package fixwire
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,8 +50,12 @@ type Span struct {
 	client       *Client
 }
 
-// maxChildren bounds the spans a segment keeps until it is sent.
-const maxChildren = 1000
+// maxChildren bounds the spans a segment keeps until it is sent;
+// maxAttributes a span's attributes, fixwire.op among them.
+const (
+	maxChildren   = 1000
+	maxAttributes = 128
+)
 
 type spanKey struct{}
 
@@ -75,7 +78,11 @@ func WithKind(k SpanKind) SpanOption { return func(s *Span) { s.Kind = k } }
 
 // WithAttributes sets attributes (OpenTelemetry's semantic conventions).
 func WithAttributes(attrs map[string]any) SpanOption {
-	return func(s *Span) { maps.Copy(s.attrs, attrs) }
+	return func(s *Span) {
+		for k, v := range attrs {
+			s.setAttribute(k, v)
+		}
+	}
 }
 
 // ContinueTrace makes the span continue a caller's trace, from its W3C
@@ -106,7 +113,7 @@ func passable(h string, limit int) string {
 		return ""
 	}
 	for i := 0; i < len(h); i++ {
-		if h[i] < ' ' && h[i] != '\t' || h[i] == 0x7f {
+		if h[i] < ' ' || h[i] == 0x7f {
 			return ""
 		}
 	}
@@ -175,25 +182,27 @@ func sampleTrace(traceID string, rate float64) bool {
 	return float64(n)/float64(uint64(1)<<56) >= 1-rate
 }
 
-// parseTraceparent reads "00-<trace id>-<parent id>-<flags>".
+// parseTraceparent reads "00-<trace id>-<parent id>-<flags>": version 00, a
+// non-zero trace id of 32 lower-case hex digits, a non-zero parent id of
+// 16, and 2 of flags. Anything else is not used.
 func parseTraceparent(h string) (trace, parent string, sampled, ok bool) {
-	parts := strings.Split(strings.TrimSpace(h), "-")
-	if len(parts) < 4 || len(parts[0]) != 2 || parts[0] == "ff" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+	parts := strings.SplitN(strings.TrimSpace(h), "-", 5)
+	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
 		return "", "", false, false
 	}
-	if !hexString(parts[1]) || !hexString(parts[2]) || strings.Trim(parts[1], "0") == "" || strings.Trim(parts[2], "0") == "" {
+	if !hexString(parts[1]) || !hexString(parts[2]) || !hexString(parts[3]) ||
+		strings.Trim(parts[1], "0") == "" || strings.Trim(parts[2], "0") == "" {
 		return "", "", false, false
 	}
-	flags, err := strconv.ParseUint(parts[3], 16, 8)
-	if err != nil {
-		return "", "", false, false
-	}
-	return strings.ToLower(parts[1]), strings.ToLower(parts[2]), flags&1 == 1, true
+	flags, _ := strconv.ParseUint(parts[3], 16, 8)
+	return parts[1], parts[2], flags&1 == 1, true
 }
 
+// hexString reports whether s is lower-case hex digits, as W3C trace
+// context writes them.
 func hexString(s string) bool {
-	for _, c := range s {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && (s[i] < 'a' || s[i] > 'f') {
 			return false
 		}
 	}
@@ -216,11 +225,20 @@ func (s *Span) Tracestate() string { return s.tracestate }
 // Baggage is the caller's baggage, passed on.
 func (s *Span) Baggage() string { return s.baggage }
 
-// SetAttribute sets an attribute.
+// SetAttribute sets an attribute. A span holds at most 128: past them, new
+// keys are left out.
 func (s *Span) SetAttribute(key string, value any) {
 	s.mu.Lock()
-	s.attrs[key] = value
+	s.setAttribute(key, value)
 	s.mu.Unlock()
+}
+
+// setAttribute sets an attribute, with s.mu held, leaving room for
+// fixwire.op.
+func (s *Span) setAttribute(key string, value any) {
+	if _, ok := s.attrs[key]; ok || len(s.attrs) < maxAttributes-1 {
+		s.attrs[key] = value
+	}
 }
 
 // SetError marks the span failed.
@@ -270,9 +288,12 @@ func (s *Span) Finish() {
 func (s *Span) json(c *Client) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	attrs := maps.Clone(s.attrs)
-	attrs = c.scrub(attrs)
+	attrs := make(map[string]any, len(s.attrs)+1)
+	for k, v := range s.attrs {
+		attrs[k] = c.plain(v)
+	}
 	attrs["fixwire.op"] = s.Op
+	attrs = c.scrub(attrs)
 	flags := 0x100
 	if s.remoteParent {
 		flags |= 0x200
@@ -282,10 +303,10 @@ func (s *Span) json(c *Client) map[string]any {
 	}
 	status := map[string]any{"code": 1}
 	if s.failed {
-		status = map[string]any{"code": 2, "message": s.message}
+		status = map[string]any{"code": 2, "message": c.text(s.message)}
 	}
 	out := map[string]any{
-		"traceId": s.TraceID, "spanId": s.SpanID, "name": c.mask(s.Name), "kind": int(s.Kind),
+		"traceId": s.TraceID, "spanId": s.SpanID, "name": c.text(s.Name), "kind": int(s.Kind),
 		"startTimeUnixNano": nanos(s.Start), "endTimeUnixNano": nanos(s.End), "attributes": attributes(attrs),
 		"status": status, "flags": flags,
 	}
@@ -295,19 +316,45 @@ func (s *Span) json(c *Client) map[string]any {
 	return out
 }
 
-// sendSpans sends finished spans as one OTLP traces export.
+// sendSpans sends finished spans as OTLP traces exports of at most maxItems
+// spans and maxRequestBytes; a span too large for one is dropped alone.
 func (c *Client) sendSpans(spans []*Span) {
 	defer c.guard()
-	items := make([]any, len(spans))
-	for i, s := range spans {
-		items[i] = s.json(c)
+	defer enterCapture()()
+	export := func(items []json.RawMessage) ([]byte, error) {
+		return json.Marshal(map[string]any{"resourceSpans": []any{map[string]any{
+			"resource": c.resource(), "scopeSpans": []any{map[string]any{"scope": scope(), "spans": items}},
+		}}})
 	}
-	body, err := json.Marshal(map[string]any{"resourceSpans": []any{map[string]any{
-		"resource": c.resource(), "scopeSpans": []any{map[string]any{"scope": scope(), "spans": items}},
-	}}})
+	none, err := export([]json.RawMessage{})
 	if err != nil {
 		c.transport.logf("encoding spans: %v", err)
 		return
 	}
-	c.transport.send(&request{path: "/v1/traces", contentType: "application/json", category: categorySpan, body: body})
+	envelope := len(none) // the bytes of a request but its spans
+	var batch []json.RawMessage
+	size := envelope
+	send := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if body, err := export(batch); err != nil {
+			c.transport.logf("encoding spans: %v", err)
+		} else {
+			c.transport.send(&request{path: "/v1/traces", contentType: "application/json", category: categorySpan, body: body})
+		}
+		batch, size = nil, envelope
+	}
+	for _, s := range spans {
+		item, err := json.Marshal(s.json(c))
+		if err != nil || envelope+len(item) > maxRequestBytes {
+			c.transport.logf("dropped a span of %d bytes (%v)", len(item), err)
+			continue
+		}
+		if len(batch) == maxItems || size+len(item)+1 > maxRequestBytes {
+			send()
+		}
+		batch, size = append(batch, item), size+len(item)+1
+	}
+	send()
 }

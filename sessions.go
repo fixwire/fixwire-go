@@ -158,9 +158,15 @@ func (a *aggregates) send() {
 		}
 		out = append(out, agg)
 	}
-	a.c.sendJSON("/v1/sessions", categorySession, map[string]any{
-		"sdk": sdk(), "release": a.c.opts.Release, "environment": a.c.opts.Environment, "aggregates": out,
-	})
+	// The counts without a user (past maxAggregates) may add a few more: a
+	// request holds maxAggregates at most.
+	for len(out) > 0 {
+		n := min(len(out), maxAggregates)
+		a.c.sendJSON("/v1/sessions", categorySession, map[string]any{
+			"sdk": sdk(), "release": a.c.opts.Release, "environment": a.c.opts.Environment, "aggregates": out[:n],
+		})
+		out = out[n:]
+	}
 }
 
 func (a *aggregates) stop() { a.once.Do(func() { close(a.quit) }) }

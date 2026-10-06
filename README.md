@@ -85,7 +85,11 @@ client := &http.Client{Transport: fixwirehttp.NewTransport(nil)}
 ```
 
 Outgoing requests become client spans and breadcrumbs. Trace headers go
-only to the URLs in `TracePropagationTargets`.
+only to `TracePropagationTargets`, compared with the URL without its user
+info, query and fragment: a target with `://` matches the URLs that start
+with it (`https://api.example.com/v2`), any other is a host, with a port if
+it has one, matching that host and its subdomains (`example.com` matches
+`api.example.com`, not `badexample.com` or `example.com.evil.net`).
 
 ## Tracing
 
@@ -141,8 +145,11 @@ fixwire.CaptureFeedback(fixwire.Feedback{Message: "Refunded the wrong order", Sc
 | `ServiceName` | `OTEL_SERVICE_NAME`, else `api` of `api@1.4.0` | |
 | `SampleRate` | 1 | Share of errors sent |
 | `TracesSampleRate` | 0 | Share of new traces kept |
-| `TracePropagationTargets` | none | URLs that receive trace headers |
+| `TracePropagationTargets` | none | Hosts and URL prefixes that receive trace headers |
 | `BeforeSend`, `BeforeBreadcrumb` | | Change or drop events and breadcrumbs |
+| `MaxBreadcrumbs` | 100 | Breadcrumbs kept per scope |
+| `MaxValueLength` | 1024 | Bytes of UTF-8 per string sent, cut on a character boundary and ending in `...` (masked before the cut) |
+| `MaxStackFrames` | 100 | Frames sent per error, the newest kept |
 | `SendDefaultPII` | off | Send the user's IP address and identifying headers |
 | `DisableRedaction`, `SensitiveKeys` | on, the server's keys | On-device masking |
 | `ErrorBudget` | 10 per issue, then 1 a minute; 600 a minute | |
