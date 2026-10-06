@@ -4,7 +4,7 @@ All notable changes to the Fixwire Go SDK are listed here. Versions follow [Sema
 Versioning](https://semver.org); before 1.0, a minor version may change the
 API.
 
-## [Unreleased]
+## [0.1.1] - 2026-10-06
 
 - `Init` with a broken DSN returns the error and leaves the SDK off, never panicking; the README and examples log it and start the app all the same.
 - Requests to Fixwire never follow a redirect, so the key in `Authorization` goes to the DSN's host only; a DSN key with spaces or control characters is refused.

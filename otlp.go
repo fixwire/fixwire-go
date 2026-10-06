@@ -12,7 +12,7 @@ import (
 // The SDK's name and version, as OpenTelemetry's telemetry.sdk.* say it.
 const (
 	sdkName    = "fixwire.go"
-	sdkVersion = "0.1.0"
+	sdkVersion = "0.1.1"
 )
 
 // Severity numbers of the levels (OpenTelemetry's).
