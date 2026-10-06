@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strconv"
@@ -20,8 +21,25 @@ const (
 // Severity numbers of the levels (OpenTelemetry's).
 var severity = map[Level]int{LevelDebug: 5, LevelInfo: 9, LevelWarning: 13, LevelError: 17, LevelFatal: 21}
 
+// maxDepth bounds the lists and maps a value nests: deeper ones are cut, as
+// is one that holds itself.
+const maxDepth = 64
+
 // value is v as an OTLP JSON AnyValue.
-func value(v any) map[string]any {
+func value(v any) map[string]any { return valueIn(v, nil) }
+
+// enter adds a list or map to the path of those a value is in; false when
+// it is too deep or on the path already.
+func enter(path []uintptr, c any) ([]uintptr, bool) {
+	p := reflect.ValueOf(c).Pointer()
+	if len(path) >= maxDepth || slices.Contains(path, p) {
+		return path, false
+	}
+	return append(path, p), true
+}
+
+// valueIn is value for v in the lists and maps of path.
+func valueIn(v any, path []uintptr) map[string]any {
 	switch x := v.(type) {
 	case nil:
 		return map[string]any{"stringValue": ""}
@@ -33,6 +51,19 @@ func value(v any) map[string]any {
 		}
 		f, _ := x.Float64()
 		return value(f)
+	case float64:
+		// OTLP's JSON spells the floats JSON has no numbers for.
+		switch {
+		case math.IsNaN(x):
+			return map[string]any{"doubleValue": "NaN"}
+		case math.IsInf(x, 1):
+			return map[string]any{"doubleValue": "Infinity"}
+		case math.IsInf(x, -1):
+			return map[string]any{"doubleValue": "-Infinity"}
+		}
+		return map[string]any{"doubleValue": x}
+	case float32:
+		return value(float64(x))
 	case bool:
 		return map[string]any{"boolValue": x}
 	case int:
@@ -43,14 +74,14 @@ func value(v any) map[string]any {
 		return map[string]any{"intValue": strconv.FormatInt(int64(x), 10)}
 	case uint64:
 		return map[string]any{"intValue": strconv.FormatUint(x, 10)}
-	case float64:
-		return map[string]any{"doubleValue": x}
-	case float32:
-		return map[string]any{"doubleValue": float64(x)}
 	case []any:
+		path, ok := enter(path, x)
+		if !ok {
+			return map[string]any{"stringValue": "[cut]"}
+		}
 		vals := make([]any, len(x))
 		for i, e := range x {
-			vals[i] = value(e)
+			vals[i] = valueIn(e, path)
 		}
 		return map[string]any{"arrayValue": map[string]any{"values": vals}}
 	case []string:
@@ -60,13 +91,17 @@ func value(v any) map[string]any {
 		}
 		return map[string]any{"arrayValue": map[string]any{"values": vals}}
 	case map[string]any:
-		return map[string]any{"kvlistValue": map[string]any{"values": attributes(x)}}
+		path, ok := enter(path, x)
+		if !ok {
+			return map[string]any{"stringValue": "[cut]"}
+		}
+		return map[string]any{"kvlistValue": map[string]any{"values": attributesIn(x, path)}}
 	case map[string]string:
 		m := make(map[string]any, len(x))
 		for k, s := range x {
 			m[k] = s
 		}
-		return value(m)
+		return valueIn(m, path)
 	case time.Time:
 		return map[string]any{"stringValue": x.UTC().Format(time.RFC3339Nano)}
 	case error:
@@ -85,13 +120,14 @@ func value(v any) map[string]any {
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return map[string]any{"stringValue": fmt.Sprint(v)}
+		// Not fmt: it would follow a map or list that holds itself forever.
+		return map[string]any{"stringValue": err.Error()}
 	}
 	var plain any
 	if json.Unmarshal(b, &plain) == nil {
 		switch p := plain.(type) {
 		case map[string]any, []any, string, bool, float64:
-			return value(p)
+			return valueIn(p, path)
 		}
 	}
 	return map[string]any{"stringValue": string(b)}
@@ -99,14 +135,16 @@ func value(v any) map[string]any {
 
 // attributes are OTLP key-values, in key order; nil and empty values are
 // left out.
-func attributes(m map[string]any) []any {
+func attributes(m map[string]any) []any { return attributesIn(m, nil) }
+
+func attributesIn(m map[string]any, path []uintptr) []any {
 	keys := slices.Sorted(maps.Keys(m))
 	out := make([]any, 0, len(keys))
 	for _, k := range keys {
 		if empty(m[k]) {
 			continue
 		}
-		out = append(out, map[string]any{"key": k, "value": value(m[k])})
+		out = append(out, map[string]any{"key": k, "value": valueIn(m[k], path)})
 	}
 	return out
 }

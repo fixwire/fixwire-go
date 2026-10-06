@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,14 +33,20 @@ type request struct {
 }
 
 // maxAttempts bounds the sends of one request; maxWait is the longest a
-// rate-limited request waits before it is dropped.
+// rate-limited request waits before it is dropped; maxPause bounds the
+// seconds an answer may pause sending for.
 const (
 	maxAttempts = 4
 	maxWait     = 5 * time.Minute
+	maxPause    = 24 * time.Hour
 )
 
 // backoffUnit is the first retry's wait, halved (tests shorten it).
 var backoffUnit = time.Second
+
+// debugLog writes the Debug lines to stderr itself: through the log
+// package they could reach a slog handler of the SDK's and be captured.
+var debugLog = log.New(os.Stderr, "", log.LstdFlags)
 
 // transport sends requests one at a time from a bounded queue, and backs
 // off where Fixwire says to (Fixwire-Rate-Limits, Retry-After).
@@ -48,22 +55,32 @@ type transport struct {
 	client *http.Client
 	debug  bool
 
-	queue chan *request
-	stop  chan struct{}
-	done  chan struct{}
+	queue  chan *request
+	stop   chan struct{}
+	done   chan struct{}
+	ctx    context.Context // ends the request in flight on close
+	cancel context.CancelFunc
+	zw     *gzip.Writer // the sending goroutine's, reused
 
 	mu      sync.Mutex
 	until   map[string]time.Time // category ("" for all) → paused until
 	pending int
+	waiting map[*request]*time.Timer // requests to send again later
+	closed  bool
 	idle    *sync.Cond
 }
 
 func newTransport(dsn DSN, opts Options) *transport {
+	// The SDK's own copy of the client never follows a redirect: the key in
+	// Authorization goes to the DSN's host only.
+	client := *opts.HTTPClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	t := &transport{
-		dsn: dsn, client: opts.HTTPClient, debug: opts.Debug,
+		dsn: dsn, client: &client, debug: opts.Debug,
 		queue: make(chan *request, opts.MaxQueue), stop: make(chan struct{}), done: make(chan struct{}),
-		until: map[string]time.Time{},
+		until: map[string]time.Time{}, waiting: map[*request]*time.Timer{},
 	}
+	t.ctx, t.cancel = context.WithCancel(context.Background())
 	t.idle = sync.NewCond(&t.mu)
 	go t.run()
 	return t
@@ -71,24 +88,35 @@ func newTransport(dsn DSN, opts Options) *transport {
 
 func (t *transport) logf(format string, args ...any) {
 	if t.debug {
-		log.Printf("fixwire: "+format, args...)
+		debugLog.Printf("fixwire: "+format, args...)
 	}
 }
 
 // send queues a request; false when the queue is full or closed.
 func (t *transport) send(r *request) bool {
 	t.mu.Lock()
-	t.pending++
+	ok := t.put(r)
+	if ok {
+		t.pending++
+	}
 	t.mu.Unlock()
+	if !ok {
+		t.logf("queue full, dropping a %s request", r.category)
+	}
+	return ok
+}
+
+// put queues r, with t.mu held; false when the queue is full or closed.
+func (t *transport) put(r *request) bool {
+	if t.closed {
+		return false
+	}
 	select {
-	case <-t.stop:
 	case t.queue <- r:
 		return true
 	default:
-		t.logf("queue full, dropping a %s request", r.category)
+		return false
 	}
-	t.finish()
-	return false
 }
 
 func (t *transport) finish() {
@@ -101,17 +129,26 @@ func (t *transport) finish() {
 	t.mu.Unlock()
 }
 
-// later puts a request back after d.
+// later puts a request back after d. As many wait as the queue holds, so
+// that an outage costs bounded memory; the rest are dropped.
 func (t *transport) later(r *request, d time.Duration) {
-	time.AfterFunc(d, func() {
-		select {
-		case <-t.stop:
-			t.finish()
-		case t.queue <- r:
-		default:
+	t.mu.Lock()
+	if t.closed || len(t.waiting) >= cap(t.queue) {
+		t.mu.Unlock()
+		t.logf("too many requests waiting, dropping a %s request", r.category)
+		t.finish()
+		return
+	}
+	t.waiting[r] = time.AfterFunc(d, func() {
+		t.mu.Lock()
+		delete(t.waiting, r)
+		ok := t.put(r)
+		t.mu.Unlock()
+		if !ok {
 			t.finish()
 		}
 	})
+	t.mu.Unlock()
 }
 
 func (t *transport) run() {
@@ -156,7 +193,12 @@ func (t *transport) deliver(r *request) {
 			return
 		}
 		backoff := time.Duration(math.Pow(2, float64(r.attempts))) * backoffUnit
-		t.later(r, max(backoff, retryAfter))
+		if wait := max(backoff, retryAfter); wait <= maxWait {
+			t.later(r, wait)
+			return
+		}
+		t.logf("dropping a %s request: retry after %s", r.category, retryAfter)
+		t.finish()
 	default:
 		t.logf("%s request refused: %d", r.category, status)
 		t.finish()
@@ -166,10 +208,14 @@ func (t *transport) deliver(r *request) {
 // post sends a request, gzipped, and reads the rate limits of the answer.
 func (t *transport) post(r *request) (status int, retryAfter time.Duration, err error) {
 	var body bytes.Buffer
-	zw := gzip.NewWriter(&body)
-	_, _ = zw.Write(r.body)
-	_ = zw.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if t.zw == nil {
+		t.zw = gzip.NewWriter(&body)
+	} else {
+		t.zw.Reset(&body)
+	}
+	_, _ = t.zw.Write(r.body)
+	_ = t.zw.Close()
+	ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.dsn.URL(r.path), &body)
 	if err != nil {
@@ -186,8 +232,8 @@ func (t *transport) post(r *request) (status int, retryAfter time.Duration, err 
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
 	_ = res.Body.Close()
 	now := time.Now()
-	if s, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil && s > 0 {
-		retryAfter = time.Duration(s) * time.Second
+	if d, ok := seconds(res.Header.Get("Retry-After")); ok {
+		retryAfter = d
 	}
 	t.limit(res.Header.Get("Fixwire-Rate-Limits"), now)
 	if res.StatusCode == http.StatusTooManyRequests && res.Header.Get("Fixwire-Rate-Limits") == "" {
@@ -196,8 +242,19 @@ func (t *transport) post(r *request) (status int, retryAfter time.Duration, err 
 	return res.StatusCode, retryAfter, nil
 }
 
+// seconds reads a header's whole seconds, at most maxPause; false for
+// none, zero or negative ones, or anything else (an HTTP date).
+func seconds(s string) (time.Duration, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return time.Duration(min(n, int(maxPause/time.Second))) * time.Second, true
+}
+
 // limit reads Fixwire-Rate-Limits: "<seconds>:<category;…>, …", no
-// categories meaning all of them.
+// categories meaning all of them. Categories this SDK doesn't send are
+// left out.
 func (t *transport) limit(header string, now time.Time) {
 	if header == "" {
 		return
@@ -206,16 +263,21 @@ func (t *transport) limit(header string, now time.Time) {
 	defer t.mu.Unlock()
 	for _, part := range strings.Split(header, ",") {
 		secs, cats, _ := strings.Cut(strings.TrimSpace(part), ":")
-		n, err := strconv.Atoi(secs)
-		if err != nil || n <= 0 {
+		d, ok := seconds(secs)
+		if !ok {
 			continue
 		}
-		until := now.Add(time.Duration(n) * time.Second)
+		until := now.Add(d)
 		names := strings.Split(cats, ";")
 		if cats == "" {
 			names = []string{""}
 		}
 		for _, c := range names {
+			switch c {
+			case "", categoryError, categoryLog, categorySpan, categorySession, categoryCheckIn, categoryFeedback:
+			default:
+				continue
+			}
 			if until.After(t.until[c]) {
 				t.until[c] = until
 			}
@@ -225,28 +287,54 @@ func (t *transport) limit(header string, now time.Time) {
 
 // flush waits until every queued request is sent or dropped, or timeout.
 func (t *transport) flush(timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
+	deadline := time.Now().Add(timeout)
+	// Wakes the wait below at the deadline; nothing is left waiting after.
+	timer := time.AfterFunc(timeout, func() {
 		t.mu.Lock()
-		for t.pending > 0 {
-			t.idle.Wait()
-		}
+		t.idle.Broadcast()
 		t.mu.Unlock()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
+	})
+	defer timer.Stop()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for t.pending > 0 {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		t.idle.Wait()
 	}
+	return true
 }
 
+// close stops sending: the request in flight is ended, and what is queued
+// or waiting is dropped.
 func (t *transport) close() {
-	select {
-	case <-t.stop:
-	default:
-		close(t.stop)
-		<-t.done
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.closed = true
+	dropped := 0
+	for r, timer := range t.waiting {
+		if timer.Stop() {
+			dropped++
+		}
+		delete(t.waiting, r)
+	}
+	t.mu.Unlock()
+	t.cancel()
+	close(t.stop)
+	<-t.done
+	for {
+		select {
+		case <-t.queue:
+			dropped++
+		default:
+			for range dropped {
+				t.finish()
+			}
+			return
+		}
 	}
 }

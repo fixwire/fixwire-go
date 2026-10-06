@@ -61,6 +61,7 @@ func (h *SlogHandler) Handle(ctx context.Context, r slog.Record) error {
 
 func (h *SlogHandler) record(ctx context.Context, r slog.Record) {
 	hub := HubFromContext(ctx)
+	defer hub.Client().guard()
 	data := map[string]any{}
 	var err error
 	// The handler's attributes carry their groups already.

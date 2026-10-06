@@ -98,6 +98,7 @@ func (h *Hub) CaptureException(err error) string {
 	if err == nil || c == nil {
 		return ""
 	}
+	defer c.guard()
 	e := &Event{Exceptions: exceptionsOf(err, stack(c.opts), Mechanism{Type: "generic", Handled: true}, c.opts)}
 	return c.capture(e, h.Scope())
 }
@@ -109,6 +110,7 @@ func (h *Hub) CaptureMessage(message string) string {
 	if c == nil {
 		return ""
 	}
+	defer c.guard()
 	return c.capture(&Event{Message: message}, h.Scope())
 }
 
@@ -118,6 +120,7 @@ func (h *Hub) CaptureEvent(e *Event) string {
 	if c == nil || e == nil {
 		return ""
 	}
+	defer c.guard()
 	return c.capture(e, h.Scope())
 }
 
@@ -129,6 +132,7 @@ func (h *Hub) RecoverPanic(r any) string {
 	if r == nil || c == nil {
 		return ""
 	}
+	defer c.guard()
 	e := &Event{Level: LevelFatal, Exceptions: exceptionsOf(panicError(r), panicStack(c.opts), Mechanism{Type: "panic", Handled: false}, c.opts)}
 	if _, ok := r.(error); !ok {
 		e.Exceptions[0].Type = "panic" // panic("…") and other values

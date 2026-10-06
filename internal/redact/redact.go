@@ -95,7 +95,7 @@ func Default() *Redactor {
 // Find returns the non-overlapping findings in s, leftmost first; when two
 // overlap, the earlier detector in the registry wins.
 func (r *Redactor) Find(s string) []Finding {
-	var out []Finding
+	var out []Finding // leftmost first, after each detector
 	var lower string
 	for _, d := range r.detectors {
 		if len(d.prefilter) > 0 {
@@ -120,23 +120,27 @@ func (r *Redactor) Find(s string) []Finding {
 		if d.may != nil && !d.may(s) {
 			continue
 		}
+		var found []Finding
 		for _, span := range d.spans(s) {
 			start, end := span[0], span[1]
 			if d.validate != nil && !d.validate(s[start:end]) {
 				continue
 			}
-			if overlaps(out, start, end) {
+			if overlaps(out, start, end) || overlaps(found, start, end) {
 				continue
 			}
-			out = append(out, Finding{Detector: d.name, Start: start, End: end})
+			found = append(found, Finding{Detector: d.name, Start: start, End: end})
+		}
+		if len(found) > 0 {
+			out = append(out, found...)
+			sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out
 }
 
-// spans returns the detector's candidate spans, from its scanner or its
-// regular expression (the configured submatch).
+// spans returns the detector's candidate spans, leftmost first, from its
+// scanner or its regular expression (the configured submatch).
 func (d detector) spans(s string) [][2]int {
 	if d.scan != nil {
 		return d.scan(s)
@@ -152,13 +156,12 @@ func (d detector) spans(s string) [][2]int {
 	return out
 }
 
+// overlaps reports whether [start, end) overlaps one of fs, which are
+// leftmost first and apart, so their ends are in order too: a binary
+// search, as text can hold many findings.
 func overlaps(fs []Finding, start, end int) bool {
-	for _, f := range fs {
-		if start < f.End && f.Start < end {
-			return true
-		}
-	}
-	return false
+	i := sort.Search(len(fs), func(i int) bool { return fs[i].End > start })
+	return i < len(fs) && fs[i].Start < end
 }
 
 // Mask replaces each finding with [REDACTED:<detector>].
@@ -240,11 +243,13 @@ func (r *Redactor) walk(v any, n *int) any {
 		// Keys hold data too ({"ada@example.com": 3}). Keys that mask alike
 		// are numbered in key order: "[REDACTED:email] (2)".
 		sort.Strings(renamed)
+		next := map[string]int{} // masked key → the number to try next
 		for _, k := range renamed {
 			masked, fs := r.Mask(k)
 			key := masked
-			for i := 2; ; i++ {
+			for i := max(next[masked], 2); ; i++ {
 				if _, taken := x[key]; !taken {
+					next[masked] = i
 					break
 				}
 				key = masked + " (" + strconv.Itoa(i) + ")"

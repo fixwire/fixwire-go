@@ -2,6 +2,7 @@ package fixwire
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"reflect"
 	"runtime"
@@ -47,7 +48,7 @@ func errorStack(err error, opts Options) []Frame {
 			continue
 		}
 		pcs := m.Call(nil)[0]
-		out := make([]uintptr, pcs.Len())
+		out := make([]uintptr, min(pcs.Len(), maxFrames)) // the newest
 		for i := range out {
 			out[i] = uintptr(pcs.Index(i).Uint())
 		}
@@ -140,10 +141,16 @@ func inApp(module, file string, opts Options) bool {
 	case module == "":
 		return false
 	}
-	for _, dep := range b.deps {
-		if within(module, dep) {
+	// A dependency's package: the module or one of its parents is one.
+	for p := module; ; {
+		if b.deps[p] {
 			return false
 		}
+		i := strings.LastIndexByte(p, '/')
+		if i < 0 {
+			break
+		}
+		p = p[:i]
 	}
 	first, _, _ := strings.Cut(module, "/")
 	if !strings.Contains(first, ".") {
@@ -160,15 +167,15 @@ func within(pkg, module string) bool {
 // buildInfo is the binary's main module and dependencies.
 type buildInfo struct {
 	main string
-	deps []string
+	deps map[string]bool
 }
 
 var build = sync.OnceValue(func() buildInfo {
-	var b buildInfo
+	b := buildInfo{deps: map[string]bool{}}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		b.main = info.Main.Path
 		for _, d := range info.Deps {
-			b.deps = append(b.deps, d.Path)
+			b.deps[d.Path] = true
 		}
 	}
 	return b
@@ -199,20 +206,24 @@ func addContext(f *Frame, n int) {
 
 func sourceLines(path string) []string {
 	source.Lock()
-	defer source.Unlock()
-	if lines, ok := source.files[path]; ok {
+	lines, ok := source.files[path]
+	source.Unlock()
+	if ok {
 		return lines
 	}
-	var lines []string
-	if st, err := os.Stat(path); err == nil && st.Size() <= maxSourceBytes {
+	// Read without the lock, so that a slow disk holds up this capture
+	// only; regular files only (a pipe would block).
+	if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() && st.Size() <= maxSourceBytes {
 		if f, err := os.Open(path); err == nil {
-			sc := bufio.NewScanner(f)
+			sc := bufio.NewScanner(io.LimitReader(f, maxSourceBytes))
 			for sc.Scan() {
 				lines = append(lines, sc.Text())
 			}
 			_ = f.Close()
 		}
 	}
+	source.Lock()
+	defer source.Unlock()
 	if len(source.files) >= maxSourceFiles {
 		for k := range source.files {
 			delete(source.files, k)

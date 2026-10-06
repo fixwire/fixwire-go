@@ -72,6 +72,7 @@ func (c *Client) CaptureCheckIn(ci CheckIn) string {
 	if c == nil || !c.enabled || strings.TrimSpace(ci.Monitor) == "" {
 		return ""
 	}
+	defer c.guard()
 	if ci.ID == "" {
 		ci.ID = newID(16)
 	}
@@ -139,6 +140,7 @@ func (h *Hub) CaptureFeedback(f Feedback) string {
 	if c == nil || !c.enabled {
 		return ""
 	}
+	defer c.guard()
 	f.Message = strings.TrimSpace(f.Message)
 	if math.IsNaN(f.Score) || math.IsInf(f.Score, 0) {
 		f.Score = 0

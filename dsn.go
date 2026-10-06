@@ -24,6 +24,10 @@ func ParseDSN(s string) (DSN, error) {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User == nil || u.User.Username() == "" {
 		return DSN{}, ErrInvalidDSN
 	}
+	// The key goes in a header: no spaces or control characters (%0D%0A).
+	if strings.ContainsFunc(u.User.Username(), func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return DSN{}, ErrInvalidDSN
+	}
 	return DSN{
 		Key:     u.User.Username(),
 		BaseURL: u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/"),

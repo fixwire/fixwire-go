@@ -1,6 +1,7 @@
 package fixwire
 
 import (
+	"container/list"
 	"hash/fnv"
 	"regexp"
 	"strconv"
@@ -42,17 +43,19 @@ func (b ErrorBudget) withDefaults() ErrorBudget {
 }
 
 // maxIssues bounds the issues the budget remembers (least recently seen
-// go first); topFrames is how many in-app frames name an issue.
+// go first); topFrames is how many in-app frames name an issue, and
+// maxTemplate how many bytes of a message.
 const (
-	maxIssues = 1024
-	topFrames = 5
+	maxIssues   = 1024
+	topFrames   = 5
+	maxTemplate = 1024
 )
 
 type bucket struct {
 	tokens     float64
 	updated    time.Time
 	suppressed int
-	seen       time.Time
+	seen       *list.Element // its issue in budget.seen
 }
 
 // take refills the bucket at perMinute up to burst and takes a token.
@@ -70,12 +73,13 @@ type budget struct {
 	opts   ErrorBudget
 	mu     sync.Mutex
 	issues map[string]*bucket
+	seen   *list.List // the issues, the most recently seen first
 	all    bucket
 }
 
 func newBudget(opts ErrorBudget) *budget {
 	opts = opts.withDefaults()
-	return &budget{opts: opts, issues: map[string]*bucket{}, all: bucket{tokens: opts.PerMinute, updated: time.Now()}}
+	return &budget{opts: opts, issues: map[string]*bucket{}, seen: list.New(), all: bucket{tokens: opts.PerMinute, updated: time.Now()}}
 }
 
 // allow reports whether an event of the issue may be sent, and the
@@ -89,12 +93,13 @@ func (b *budget) allow(issue string, now time.Time) (ok bool, suppressed int) {
 	bk := b.issues[issue]
 	if bk == nil {
 		if len(b.issues) >= maxIssues {
-			b.forgetOldest()
+			delete(b.issues, b.seen.Remove(b.seen.Back()).(string))
 		}
-		bk = &bucket{tokens: float64(b.opts.PerIssueBurst), updated: now}
+		bk = &bucket{tokens: float64(b.opts.PerIssueBurst), updated: now, seen: b.seen.PushFront(issue)}
 		b.issues[issue] = bk
+	} else {
+		b.seen.MoveToFront(bk.seen)
 	}
-	bk.seen = now
 	if bk.take(float64(b.opts.PerIssueBurst), b.opts.PerIssuePerMinute, now) && b.all.take(b.opts.PerMinute, b.opts.PerMinute, now) {
 		suppressed, bk.suppressed = bk.suppressed, 0
 		return true, suppressed
@@ -103,21 +108,19 @@ func (b *budget) allow(issue string, now time.Time) (ok bool, suppressed int) {
 	return false, 0
 }
 
-func (b *budget) forgetOldest() {
-	var oldest string
-	var at time.Time
-	for k, v := range b.issues {
-		if oldest == "" || v.seen.Before(at) {
-			oldest, at = k, v.seen
-		}
-	}
-	delete(b.issues, oldest)
-}
-
 // variable are the parts of a message that change between occurrences:
 // hex, UUIDs, long hex ids, numbers and emails.
 var variable = regexp.MustCompile(`\b0x[0-9a-fA-F]+\b|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|` +
 	`\b[0-9a-fA-F]{16,}\b|\d+(?:\.\d+)?|\S+@\S+\.\w+`)
+
+// template is a message's start without the parts that vary: a bounded
+// cost on the app's path, which every event takes, sent or not.
+func template(message string) string {
+	if len(message) > maxTemplate {
+		message = message[:maxTemplate]
+	}
+	return variable.ReplaceAllString(message, "<*>")
+}
 
 // issueOf is the event's fingerprint for the budgets: its exception types
 // and top in-app frames (or its message without the parts that vary), and
@@ -142,10 +145,10 @@ func issueOf(e *Event) string {
 			parts = append(parts, f.Module+"|"+f.Function)
 		}
 		if len(frames) == 0 {
-			parts = append(parts, variable.ReplaceAllString(e.Exceptions[0].Message, "<*>"))
+			parts = append(parts, template(e.Exceptions[0].Message))
 		}
 	} else {
-		parts = append(parts, variable.ReplaceAllString(e.Message, "<*>"))
+		parts = append(parts, template(e.Message))
 	}
 	if len(e.Fingerprint) > 0 {
 		parts = append(parts, strings.Join(e.Fingerprint, "\x1f"))

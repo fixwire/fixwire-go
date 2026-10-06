@@ -124,7 +124,20 @@ func (c *Client) scrub(m map[string]any, skip ...string) map[string]any {
 			delete(m, k)
 		}
 	}
-	plain, _ := c.redactor.Walk(jsonOf(m))
+	src, ok := jsonOf(m).(map[string]any)
+	if !ok {
+		// A value without a JSON form (NaN, a channel, a cycle) must not
+		// cost the others: they go one by one, and it as the reason.
+		src = make(map[string]any, len(m))
+		for k, v := range m {
+			if _, err := json.Marshal(v); err != nil {
+				src[k] = err.Error()
+			} else {
+				src[k] = jsonOf(v)
+			}
+		}
+	}
+	plain, _ := c.redactor.Walk(src)
 	out, _ := plain.(map[string]any)
 	if out == nil {
 		out = map[string]any{}
@@ -211,6 +224,15 @@ func (c *Client) Close(timeout time.Duration) {
 	}
 	c.Flush(timeout)
 	c.transport.close()
+}
+
+// guard keeps a panic from reaching the app: one in the SDK, or in the
+// app's own methods it calls (Error, String, MarshalJSON, BeforeSend).
+// Deferred where the app calls in.
+func (c *Client) guard() {
+	if r := recover(); r != nil && c != nil && c.transport != nil {
+		c.transport.logf("recovered from a panic: %v", r)
+	}
 }
 
 // newID is n random bytes in hex: 16 for event and trace ids, 8 for span

@@ -88,8 +88,29 @@ func ContinueTrace(traceparent, tracestate, baggage string) SpanOption {
 			return
 		}
 		s.TraceID, s.ParentSpanID, s.Sampled, s.remoteParent = trace, parent, sampled, true
-		s.tracestate, s.baggage = tracestate, baggage
+		s.tracestate, s.baggage = passable(tracestate, maxTracestate), passable(baggage, maxBaggage)
 	}
+}
+
+// maxTracestate and maxBaggage bound what a caller's headers may carry on
+// to every call (the W3C limits).
+const (
+	maxTracestate = 512
+	maxBaggage    = 8192
+)
+
+// passable is a caller's header as it may be passed on: "" when it is
+// longer than limit or holds a control character.
+func passable(h string, limit int) string {
+	if len(h) > limit {
+		return ""
+	}
+	for i := 0; i < len(h); i++ {
+		if h[i] < ' ' && h[i] != '\t' || h[i] == 0x7f {
+			return ""
+		}
+	}
+	return h
 }
 
 // StartSpan starts a span under the one in ctx (or a new trace), and
@@ -276,6 +297,7 @@ func (s *Span) json(c *Client) map[string]any {
 
 // sendSpans sends finished spans as one OTLP traces export.
 func (c *Client) sendSpans(spans []*Span) {
+	defer c.guard()
 	items := make([]any, len(spans))
 	for i, s := range spans {
 		items[i] = s.json(c)

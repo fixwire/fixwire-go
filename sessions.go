@@ -113,11 +113,20 @@ func newAggregates(c *Client, interval time.Duration) *aggregates {
 	return a
 }
 
+// maxAggregates bounds the counts kept between sends (minutes × users),
+// and so a send's size (the protocol's limit is 1 MB); past it, sessions
+// are counted without their user.
+const maxAggregates = 5000
+
 func (a *aggregates) record(status, did string, at time.Time) {
 	k := aggregateKey{minute: at.UTC().Truncate(time.Minute), did: did}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	b := a.buckets[k]
+	if b == nil && len(a.buckets) >= maxAggregates {
+		k.did = ""
+		b = a.buckets[k]
+	}
 	if b == nil {
 		b = &aggregateCounts{}
 		a.buckets[k] = b

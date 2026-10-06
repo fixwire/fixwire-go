@@ -38,9 +38,12 @@ func NewScope() *Scope {
 func (s *Scope) Clone() *Scope {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// The breadcrumbs are shared, capped at their length: each scope only
+	// appends past its own, and an append to the copy moves it.
+	n := len(s.breadcrumbs)
 	c := &Scope{
 		user: s.user, tags: maps.Clone(s.tags), contexts: map[string]map[string]any{}, extra: maps.Clone(s.extra),
-		breadcrumbs: slices.Clone(s.breadcrumbs), level: s.level, fingerprint: slices.Clone(s.fingerprint),
+		breadcrumbs: s.breadcrumbs[:n:n], level: s.level, fingerprint: slices.Clone(s.fingerprint),
 		transaction: s.transaction, request: s.request, span: s.span, session: s.session,
 	}
 	for k, v := range s.contexts {
@@ -180,7 +183,9 @@ func (s *Scope) AddBreadcrumb(b Breadcrumb, max int) {
 	s.mu.Lock()
 	s.breadcrumbs = append(s.breadcrumbs, b)
 	if over := len(s.breadcrumbs) - max; over > 0 {
-		s.breadcrumbs = slices.Delete(s.breadcrumbs, 0, over)
+		// O(1): the oldest stay behind in the array until append moves the
+		// rest to a new one.
+		s.breadcrumbs = s.breadcrumbs[over:]
 	}
 	s.mu.Unlock()
 }
