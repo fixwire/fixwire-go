@@ -24,10 +24,7 @@ jobs:
           go-version: ${{ matrix.go }}
       - run: go vet ./...
       - run: go test -race ./...
-      - name: examples (built, run and checked against a fake ingest)
-        # They stop on SIGTERM, as containers stop apps, and the test checks what they send then:
-        # Windows has no SIGTERM to send them.
-        if: runner.os != 'Windows'
+      - name: examples (built, run, stopped and checked against a fake ingest)
         working-directory: examples
         run: go vet ./... && go test -race ./...
 

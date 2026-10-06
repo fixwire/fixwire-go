@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -183,6 +182,7 @@ func TestShopAPI(t *testing.T) {
 	var logs bytes.Buffer
 	cmd.Stderr = &logs
 	cmd.Env = append(os.Environ(), "FIXWIRE_DSN="+in.dsn(), "PORT="+port, "INVENTORY_URL="+inventory.URL, "RELEASE=shop-api@1.0.0")
+	stoppable(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,9 @@ func TestShopAPI(t *testing.T) {
 			t.Fatalf("%s %s = %d, want %d\n%s", c.method, c.path, got, c.want, logs.String())
 		}
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	if err := stop(cmd); err != nil {
+		t.Fatalf("stopping the API: %v", err)
+	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("the API did not stop cleanly: %v\n%s", err, logs.String())
 	}

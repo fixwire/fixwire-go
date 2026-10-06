@@ -81,7 +81,8 @@ func main() {
 	}()
 	slog.Info("listening", "addr", srv.Addr)
 
-	// On SIGTERM: finish the requests under way, then send what is left.
+	// When stopped (SIGTERM, or os.Interrupt: Ctrl-C, and on Windows Ctrl-Break too): finish the
+	// requests under way, then send what is left.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
 	<-stop

@@ -44,7 +44,7 @@ fixwire.Init(fixwire.Options{
 slog.SetDefault(slog.New(fixwire.NewSlogHandler(slog.NewTextHandler(os.Stderr, nil), nil)))
 inventory := &http.Client{Transport: fixwirehttp.NewTransport(nil)}
 handler := fixwirehttp.New(fixwirehttp.Options{}).Handle(withUser(mux))
-// … and on SIGTERM: srv.Shutdown(ctx), then fixwire.Close(2 * time.Second)
+// … and when stopped (SIGTERM, Ctrl-C or Ctrl-Break): srv.Shutdown(ctx), then fixwire.Close(2 * time.Second)
 ```
 
 Handlers reach their request's scope with

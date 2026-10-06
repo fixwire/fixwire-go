@@ -6,5 +6,5 @@ working (`go test ./...` here).
 
 | Example | Shows |
 |---|---|
-| [shop-api](shop-api) | `fixwirehttp` middleware: a scope, a session and a server span per request named after its route; the signed-in user; handled errors with context; panics reported as crashes (answered 500); 404s not reported; a database span; a traced call to another service with trace headers sent only to it; `slog` records as breadcrumbs; flushing on SIGTERM |
+| [shop-api](shop-api) | `fixwirehttp` middleware: a scope, a session and a server span per request named after its route; the signed-in user; handled errors with context; panics reported as crashes (answered 500); 404s not reported; a database span; a traced call to another service with trace headers sent only to it; `slog` records as breadcrumbs; flushing when stopped (SIGTERM, Ctrl-C, or Ctrl-Break on Windows) |
 | [nightly-report](nightly-report) | A cron job: check-ins to a monitor (created from the first one), one scope per account, carrying on after a failure, a summary warning, a trace for the run, `Recover`, `Close` before exiting |
