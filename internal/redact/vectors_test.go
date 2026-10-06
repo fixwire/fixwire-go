@@ -10,8 +10,9 @@ import (
 	"testing"
 )
 
-// The server's parity corpus (pkg/redact/testdata/vectors.json): this port
-// must mask every string and document exactly as the server does.
+// The server's parity corpus (a copy of pkg/redact/testdata/vectors.json in
+// fixwire/fixwire, kept identical): this port must mask every string and
+// document exactly as the server does.
 
 type vectors struct {
 	Detectors     []string            `json:"detectors"`
@@ -33,25 +34,15 @@ type vectors struct {
 
 func loadVectors(t *testing.T) vectors {
 	t.Helper()
-	dir, err := os.Getwd()
+	b, err := os.ReadFile(filepath.Join("testdata", "vectors.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for {
-		b, err := os.ReadFile(filepath.Join(dir, "pkg", "redact", "testdata", "vectors.json"))
-		if err == nil {
-			var v vectors
-			if err := json.Unmarshal(b, &v); err != nil {
-				t.Fatal(err)
-			}
-			return v
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("pkg/redact/testdata/vectors.json not found above the package")
-		}
-		dir = parent
+	var v vectors
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
 	}
+	return v
 }
 
 func decode(t *testing.T, s string) any {
