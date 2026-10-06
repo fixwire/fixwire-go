@@ -107,13 +107,14 @@ const (
 )
 
 // passable is a caller's header as it may be passed on: "" when it is
-// longer than limit or holds a control character.
+// longer than limit or holds a control character. A tab is W3C's list
+// whitespace, not one.
 func passable(h string, limit int) string {
 	if len(h) > limit {
 		return ""
 	}
 	for i := 0; i < len(h); i++ {
-		if h[i] < ' ' || h[i] == 0x7f {
+		if h[i] < ' ' && h[i] != '\t' || h[i] == 0x7f {
 			return ""
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -145,6 +146,36 @@ func TestRetries(t *testing.T) {
 	for i := 1; i < len(at); i++ {
 		if gap, want := at[i].Sub(at[i-1]), backoffUnit<<(i-1); gap < want || gap > want+time.Second {
 			t.Errorf("retry %d after %s, want %s", i, gap, want)
+		}
+	}
+}
+
+// A 429's retry counts toward the same 4 sends as those after a 5xx.
+func TestRetriesCountTooManyRequests(t *testing.T) {
+	backoffUnit = 10 * time.Millisecond
+	t.Cleanup(func() { backoffUnit = time.Second })
+	limited := http.Header{"Fixwire-Rate-Limits": {"0:error"}} // a pause that ends at once
+	for name, answer := range map[string]func(int, *http.Request) (int, http.Header){
+		"429s": func(int, *http.Request) (int, http.Header) { return http.StatusTooManyRequests, limited },
+		"429s and 5xxs": func(n int, _ *http.Request) (int, http.Header) {
+			if n%2 == 0 {
+				return http.StatusTooManyRequests, limited
+			}
+			return http.StatusServiceUnavailable, nil
+		},
+		"a 429 last": func(n int, _ *http.Request) (int, http.Header) {
+			if n == 3 {
+				return http.StatusTooManyRequests, limited
+			}
+			return http.StatusBadGateway, nil
+		},
+	} {
+		h, f := testClient(t, Options{})
+		f.answer = answer
+		h.CaptureMessage("limited")
+		flush(t, h)
+		if got := len(f.requests("/v1/logs")); got != 4 {
+			t.Errorf("%s: %d sends, want 4 in all", name, got)
 		}
 	}
 }
@@ -409,18 +440,24 @@ func TestPropagatedHeadersBounded(t *testing.T) {
 		{strings.Repeat("a", 513), strings.Repeat("b", 8193)},
 		{"fw=1\r\nX-Injected: 1", "user=1\nX-Injected: 1"},
 		{"fw=1\x00", "user=1\x7f"},
-		{"fw=1,\tother=2", "user=1,\tplan=team"},
+		{"fw=1,\x08other=2", "user=1,\vplan=team"}, // the control characters either side of tab
+		{"fw=1,\t" + strings.Repeat("a", 507), "user=1,\t" + strings.Repeat("b", 8185)},
 	} {
 		s, _ := StartSpan(context.Background(), "GET /", ContinueTrace(parent, c.tracestate, c.baggage))
 		if s.TraceID == "" || s.Tracestate() != "" || s.Baggage() != "" {
 			t.Errorf("passed on %q, %q", s.Tracestate(), s.Baggage())
 		}
 	}
-	// At the limits, they go on whole.
-	tracestate, baggage := "fw="+strings.Repeat("a", 509), "user="+strings.Repeat("b", 8187)
-	s, _ := StartSpan(context.Background(), "GET /", ContinueTrace(parent, tracestate, baggage))
-	if len(tracestate) != 512 || len(baggage) != 8192 || s.Tracestate() != tracestate || s.Baggage() != baggage {
-		t.Errorf("passed on %d and %d bytes", len(s.Tracestate()), len(s.Baggage()))
+	// At the limits, they go on whole; a tab is W3C's list whitespace.
+	for _, c := range []struct{ tracestate, baggage string }{
+		{"fw=" + strings.Repeat("a", 509), "user=" + strings.Repeat("b", 8187)},
+		{"fw=1,\t" + strings.Repeat("a", 506), "user=1,\t" + strings.Repeat("b", 8184)},
+		{"fw=1 ,\tother=2\t", "user=1,\tplan=team"},
+	} {
+		s, _ := StartSpan(context.Background(), "GET /", ContinueTrace(parent, c.tracestate, c.baggage))
+		if len(c.tracestate) > 512 || len(c.baggage) > 8192 || s.Tracestate() != c.tracestate || s.Baggage() != c.baggage {
+			t.Errorf("passed on %d of %d bytes, %d of %d", len(s.Tracestate()), len(c.tracestate), len(s.Baggage()), len(c.baggage))
+		}
 	}
 }
 
@@ -534,6 +571,59 @@ func TestStringsCut(t *testing.T) {
 	h, _ = testClient(t, Options{MaxValueLength: 10})
 	if got := h.Client().text("abcdefghijklmnop"); got != "abcdefg..." {
 		t.Errorf("MaxValueLength 10: %q", got)
+	}
+}
+
+// The app's own configuration (release, environment, service and server
+// names, a monitor's slug and config) is cut to MaxValueLength but sent as
+// given; feedback is the app's data, masked and cut.
+func TestConfigurationCutNotMasked(t *testing.T) {
+	long, want := strings.Repeat("x", 1025), strings.Repeat("x", 1021)+"..."
+	release, environment := "api@1.2.3.example", "ops@example.com"
+	h, f := testClient(t, Options{Release: release, Environment: environment, ServerName: long, ServiceName: "svc-" + long})
+	if masked := h.Client().text(release); masked == release {
+		t.Fatalf("%q is not masked as data either: the test shows nothing", release)
+	}
+	h.CaptureMessage("m")
+	end := h.Clone().StartRequestSession()
+	end()
+	monitor, schedule, timezone := environment+"-"+long, "0 3 * * * "+long, environment+long
+	h.Client().CaptureCheckIn(CheckIn{Monitor: monitor, Config: &MonitorConfig{Schedule: CrontabSchedule(schedule), Timezone: timezone}})
+	h.CaptureFeedback(Feedback{Message: "mail ada@example.com " + long, Name: long, Email: "ada@example.com",
+		URL: "https://shop.example/?q=" + long, Source: long, Score: 1})
+	flush(t, h)
+
+	_, resource := logRecords(t, f.requests("/v1/logs"))
+	if resource["service.version"] != release || resource["deployment.environment.name"] != environment ||
+		resource["host.name"] != want || resource["service.name"] != "svc-"+strings.Repeat("x", 1017)+"..." {
+		t.Errorf("resource %v", resource)
+	}
+	if s := f.requests("/v1/sessions"); len(s) != 1 || s[0].body["release"] != release || s[0].body["environment"] != environment {
+		t.Errorf("sessions %v", s)
+	}
+	checkIns := f.requests("/v1/check-ins/" + monitor[:1021] + "...")
+	if len(checkIns) != 1 {
+		t.Fatalf("check-ins %v", len(f.requests("")))
+	}
+	config := checkIns[0].body["monitor_config"].(map[string]any)
+	if checkIns[0].body["environment"] != environment || config["timezone"] != timezone[:1021]+"..." ||
+		config["schedule"].(map[string]any)["value"] != schedule[:1021]+"..." {
+		t.Errorf("check-in %v", checkIns[0].body)
+	}
+	fb := f.requests("/v1/feedback")
+	if len(fb) != 1 {
+		t.Fatalf("feedback %v", fb)
+	}
+	b := fb[0].body
+	if msg, _ := b["message"].(string); !strings.HasPrefix(msg, "mail [REDACTED:email] x") || len(msg) != 1024 {
+		t.Errorf("feedback message of %d bytes: %.40q", len(msg), msg)
+	}
+	if u, _ := b["url"].(string); len(u) > 1024 || !strings.HasSuffix(u, "...") {
+		t.Errorf("feedback url of %d bytes", len(u))
+	}
+	if b["name"] != want || b["email"] != "[REDACTED:email]" || b["source"] != want ||
+		b["release"] != release || b["environment"] != environment {
+		t.Errorf("feedback %v", b)
 	}
 }
 
@@ -772,6 +862,53 @@ func TestAggregatesBounded(t *testing.T) {
 	}
 	if len(a.buckets) != maxAggregates+1 || total != maxAggregates+1000 || a.buckets[aggregateKey{now.UTC().Truncate(time.Minute), ""}].exited != 1000 {
 		t.Errorf("%d buckets, %d sessions", len(a.buckets), total)
+	}
+}
+
+// The source cache holds at most 64 files and 32 MB of lines.
+func TestSourceCacheBounded(t *testing.T) {
+	if maxSourceFiles != 64 || maxSourceCache != 32<<20 {
+		t.Fatalf("bounds of %d files and %d bytes", maxSourceFiles, maxSourceCache)
+	}
+	reset := func() {
+		source.Lock()
+		source.files, source.bytes = map[string][]string{}, 0
+		source.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for i := range maxSourceFiles + 1 {
+		sourceLines(write(fmt.Sprint(i, ".go"), "package x\n"))
+	}
+	source.Lock()
+	if n := len(source.files); n != maxSourceFiles {
+		t.Errorf("%d files cached", n)
+	}
+	source.Unlock()
+	// Four files of 9 MB, 36 in all: the oldest make room.
+	big, last := strings.Repeat(strings.Repeat("x", 1023)+"\n", 9<<10), ""
+	for i := range 4 {
+		last = write(fmt.Sprint("big", i, ".go"), big)
+		if lines := sourceLines(last); len(lines) != 9<<10 {
+			t.Fatalf("%d lines read", len(lines))
+		}
+	}
+	source.Lock()
+	defer source.Unlock()
+	total := 0
+	for _, lines := range source.files {
+		total += linesSize(lines)
+	}
+	if total != source.bytes || total > maxSourceCache || len(source.files) > maxSourceFiles || source.files[last] == nil {
+		t.Errorf("%d files of %d bytes cached (%d counted)", len(source.files), total, source.bytes)
 	}
 }
 

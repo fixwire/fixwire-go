@@ -5,7 +5,9 @@ import (
 )
 
 // Init sets up the SDK: the current hub gets a client for opts. Without a
-// DSN (and FIXWIRE_DSN) the SDK stays off.
+// DSN (and FIXWIRE_DSN) the SDK stays off. A broken DSN is returned as an
+// error and the SDK stays off too, never panicking: log it, and let the app
+// start.
 func Init(opts Options) error {
 	c, err := NewClient(opts)
 	if err != nil {

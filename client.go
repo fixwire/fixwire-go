@@ -35,6 +35,11 @@ type Client struct {
 // nothing.
 func NewClient(opts Options) (*Client, error) {
 	opts = opts.withDefaults()
+	// The app's own names are cut, never masked: "api@1.2.3.example" is a
+	// release, not an email.
+	for _, s := range []*string{&opts.Release, &opts.Environment, &opts.ServerName, &opts.ServiceName} {
+		*s = cut(*s, opts.MaxValueLength)
+	}
 	c := &Client{opts: opts}
 	if opts.DSN == "" {
 		return c, nil
@@ -57,7 +62,8 @@ func NewClient(opts Options) (*Client, error) {
 	return c, nil
 }
 
-// Options are the client's options, defaults filled in.
+// Options are the client's options, defaults filled in and names cut to
+// MaxValueLength.
 func (c *Client) Options() Options { return c.opts }
 
 // capture sends an event with what the scope knows; its id, or "" when it
@@ -133,9 +139,10 @@ func (c *Client) capture(e *Event, scope *Scope) string {
 }
 
 // scrub readies m, of JSON's own types (app values through plain), to be
-// sent, in place: secrets and personal data masked, but in the keys of skip,
-// then strings cut to MaxValueLength. Redaction reads the part of a string
-// kept and the next 16 kB.
+// sent, in place: secrets and personal data masked, but in the keys of skip
+// (ids, and the app's own configuration), then every string cut to
+// MaxValueLength. Redaction reads the part of a string kept and the next
+// 16 kB.
 func (c *Client) scrub(m map[string]any, skip ...string) map[string]any {
 	kept := map[string]any{}
 	for _, k := range skip {
@@ -149,10 +156,10 @@ func (c *Client) scrub(m map[string]any, skip ...string) map[string]any {
 	if c.redactor != nil {
 		m = c.redact(m)
 	}
-	eachString(m, func(s string) string { return cut(s, limit) })
 	for k, v := range kept {
 		m[k] = v
 	}
+	eachString(m, func(s string) string { return cut(s, limit) })
 	return m
 }
 

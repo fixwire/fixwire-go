@@ -79,12 +79,21 @@ func (c *Client) CaptureCheckIn(ci CheckIn) string {
 	if ci.Status == "" {
 		ci.Status = CheckInOK
 	}
+	// The monitor's slug and config are the app's own: cut, never masked.
+	limit := c.opts.MaxValueLength
+	ci.Monitor = cut(ci.Monitor, limit)
 	body := map[string]any{"sdk": sdk(), "check_in_id": ci.ID, "status": ci.Status, "environment": c.opts.Environment}
 	if ci.Duration > 0 {
 		body["duration"] = ci.Duration.Seconds()
 	}
 	if ci.Config != nil {
-		body["monitor_config"] = ci.Config
+		config := *ci.Config
+		config.Timezone = cut(config.Timezone, limit)
+		config.Schedule.Type, config.Schedule.Unit = cut(config.Schedule.Type, limit), cut(config.Schedule.Unit, limit)
+		if s, ok := config.Schedule.Value.(string); ok {
+			config.Schedule.Value = cut(s, limit)
+		}
+		body["monitor_config"] = &config
 	}
 	if !c.sendJSON("/v1/check-ins/"+url.PathEscape(ci.Monitor), categoryCheckIn, body) {
 		return ""

@@ -48,6 +48,36 @@ func TestDisabledWithoutDSN(t *testing.T) {
 	}
 }
 
+// Init never panics: a broken DSN, given or from FIXWIRE_DSN, is returned
+// and the SDK stays off.
+func TestInitWithBrokenDSN(t *testing.T) {
+	bound := CurrentHub().Client()
+	t.Cleanup(func() { CurrentHub().BindClient(bound) })
+	CurrentHub().BindClient(nil)
+	for _, c := range []struct{ option, env string }{
+		{"ingest.fixwire.dev", ""}, {"https://ingest.fixwire.dev", ""}, {"ftp://k@host", ""},
+		{"https://k%0D%0A@host", ""}, {"https://k@[::1", ""}, {"%", ""}, {"", "https://@host"},
+	} {
+		t.Setenv("FIXWIRE_DSN", c.env)
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Init(%q, FIXWIRE_DSN=%q) panicked: %v", c.option, c.env, r)
+				}
+			}()
+			err = Init(Options{DSN: c.option, Release: "api@1.0.0"})
+		}()
+		if !errors.Is(err, ErrInvalidDSN) {
+			t.Errorf("Init(%q, FIXWIRE_DSN=%q) = %v, want ErrInvalidDSN", c.option, c.env, err)
+		}
+		if CurrentHub().Client() != nil || CaptureMessage("x") != "" || !Flush(time.Second) {
+			t.Errorf("the SDK is on after Init(%q, FIXWIRE_DSN=%q)", c.option, c.env)
+		}
+		Close(time.Second)
+	}
+}
+
 type cartError struct{ ID int }
 
 func (e *cartError) Error() string { return fmt.Sprintf("cart %d is empty", e.ID) }

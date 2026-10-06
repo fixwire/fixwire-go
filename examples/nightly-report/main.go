@@ -23,7 +23,7 @@ var accounts = []string{"acme", "globex", "initech"}
 
 func main() {
 	if err := fixwire.Init(fixwire.Options{Release: "nightly-report@1.0.0", TracesSampleRate: 1}); err != nil {
-		log.Fatal(err)
+		log.Printf("fixwire is off: %v", err) // the job runs all the same
 	}
 	// A panic anywhere in the job is reported before the program dies.
 	defer fixwire.Recover()

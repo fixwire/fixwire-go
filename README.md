@@ -18,7 +18,7 @@ func main() {
 		Release: "api@1.4.0",
 	})
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("fixwire is off: %v", err) // the app starts all the same
 	}
 	defer fixwire.Close(2 * time.Second) // sends what is left before exiting
 

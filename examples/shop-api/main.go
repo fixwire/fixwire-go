@@ -55,7 +55,7 @@ func main() {
 		TracePropagationTargets: []string{inventoryURL},
 	})
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("fixwire is off: %v", err) // the API starts all the same
 	}
 	// Log records become breadcrumbs (and events from Error up).
 	slog.SetDefault(slog.New(fixwire.NewSlogHandler(slog.NewTextHandler(os.Stderr, nil), nil)))
