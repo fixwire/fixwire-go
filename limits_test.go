@@ -969,7 +969,8 @@ func TestStackFramesNewest(t *testing.T) {
 	}
 
 	// The same holds for the stack of where an error is captured: 101 of
-	// encoding/json's, not the test runner's under them.
+	// encoding/json's (or encoding/json/v2's, which some toolchains marshal
+	// through), not the test runner's under them.
 	h, f := testClient(t, Options{MaxStackFrames: 101})
 	var v any = captureOnMarshal{h}
 	for range 150 {
@@ -985,7 +986,7 @@ func TestStackFramesNewest(t *testing.T) {
 		t.Fatalf("%d frames", len(frames))
 	}
 	for _, fr := range frames {
-		if m := fr.(map[string]any)["module"]; m != "encoding/json" {
+		if m, _ := fr.(map[string]any)["module"].(string); !strings.HasPrefix(m, "encoding/json") {
 			t.Fatalf("a frame of %v kept: %v", m, fr)
 		}
 	}
