@@ -11,12 +11,18 @@ import (
 // Text full of findings costs about as much per finding as text with one:
 // overlap checks are binary searches, not scans of what was found.
 func TestManyFindings(t *testing.T) {
-	r := Default()
-	s := strings.Repeat("a@b.cc password= ", 60000) // 1 MB
-	start := time.Now()
-	masked, fs := r.Mask(s)
-	if took := time.Since(start); took > 10*time.Second {
-		t.Errorf("masking %d findings took %s", len(fs), took)
+	// Four times the findings take about four times as long, not sixteen:
+	// compared with each other, so a slow machine (or -race) can't fail it.
+	mask := func(n int) (string, []Finding, time.Duration) {
+		s := strings.Repeat("a@b.cc password= ", n)
+		start := time.Now()
+		masked, fs := Default().Mask(s)
+		return masked, fs, time.Since(start)
+	}
+	_, _, small := mask(15000)
+	masked, fs, large := mask(60000) // 1 MB
+	if large > 8*small+100*time.Millisecond {
+		t.Errorf("4x the findings took %s against %s: not linear", large, small)
 	}
 	if len(fs) < 60000 || strings.Contains(masked, "a@b.cc") {
 		t.Errorf("%d findings", len(fs))
@@ -49,16 +55,21 @@ func TestHostileSecretNames(t *testing.T) {
 
 // Keys that mask alike are numbered in key order, each found in one step.
 func TestManyKeysMaskingAlike(t *testing.T) {
-	r := Default()
-	doc := map[string]any{}
-	const n = 20000
-	for i := range n {
-		doc[fmt.Sprintf("user%05d@example.com", i)] = i
+	walk := func(n int) (any, int, time.Duration) {
+		doc := map[string]any{}
+		for i := range n {
+			doc[fmt.Sprintf("user%05d@example.com", i)] = i
+		}
+		start := time.Now()
+		out, masked := Default().Walk(doc)
+		return out, masked, time.Since(start)
 	}
-	start := time.Now()
-	out, masked := r.Walk(doc)
-	if took := time.Since(start); took > 10*time.Second {
-		t.Errorf("renaming %d keys took %s", n, took)
+	// Compared with a quarter as many keys, as in TestManyFindings.
+	const n = 20000
+	_, _, small := walk(n / 4)
+	out, masked, large := walk(n)
+	if large > 8*small+100*time.Millisecond {
+		t.Errorf("renaming 4x the keys took %s against %s: not linear", large, small)
 	}
 	m := out.(map[string]any)
 	if masked != n || len(m) != n || m["[REDACTED:email]"] != 0 || m["[REDACTED:email] (2)"] != 1 ||
