@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,6 +142,9 @@ func plain(v map[string]any) any {
 func build(t *testing.T, pkg string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), filepath.Base(pkg))
+	if runtime.GOOS == "windows" {
+		bin += ".exe" // Windows runs only what is named so
+	}
 	if out, err := exec.CommandContext(context.Background(), "go", "build", "-o", bin, pkg).CombinedOutput(); err != nil {
 		t.Fatalf("go build %s: %v\n%s", pkg, err, out)
 	}
