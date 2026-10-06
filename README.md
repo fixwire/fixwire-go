@@ -1,5 +1,7 @@
 # fixwire for Go
 
+[![CI](https://github.com/fixwire/fixwire-go/actions/workflows/ci.yml/badge.svg)](https://github.com/fixwire/fixwire-go/actions/workflows/ci.yml)
+
 The Fixwire SDK for Go: errors and panics, traces, release health, cron
 monitors and feedback. Standard library only; Go 1.23 or newer.
 

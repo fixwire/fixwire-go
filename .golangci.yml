@@ -1,0 +1,31 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - misspell
+    - bodyclose
+    - noctx
+    - unconvert
+    - revive
+  settings:
+    # Doc comments on every exported identifier and package: they are what
+    # editors show on hover and what go doc prints.
+    revive:
+      rules:
+        - name: exported
+          arguments: ["disableStutteringCheck"]
+        - name: package-comments
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/fixwire/fixwire-go

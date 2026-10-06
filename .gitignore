@@ -1,0 +1,6 @@
+# What go build leaves in the example directories
+/examples/shop-api/shop-api
+/examples/nightly-report/nightly-report
+*.exe
+*.test
+coverage.out
