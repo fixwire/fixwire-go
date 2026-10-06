@@ -103,7 +103,10 @@ func WithMonitor(ctx context.Context, monitor string, config *MonitorConfig, job
 	status := CheckInError
 	defer func() {
 		if id != "" {
-			c.CaptureCheckIn(CheckIn{Monitor: monitor, Status: status, ID: id, Duration: time.Since(start)})
+			// A run is always measured: where the clock is coarser than the job (Windows), it took
+			// less than a tick, not nothing.
+			took := max(time.Since(start), time.Nanosecond)
+			c.CaptureCheckIn(CheckIn{Monitor: monitor, Status: status, ID: id, Duration: took})
 		}
 	}()
 	err = job(ctx)
